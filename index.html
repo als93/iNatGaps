@@ -1,0 +1,1616 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta name="description" content="iNatGaps helps citizen scientists discover under-sampled places and plan biodiversity surveys.">
+  <!-- v8: optional Fast mode (grid tiles, verified against /observations). v8: date-range observation period (ported from the grid-tile prototype). v6: saved counts (24 h, localStorage) + smart scan that skips empty blocks + indexed polygon clipping. -->
+  <!-- v5: request pacing + shared 429 backoff, 150-cell cap, no auto-scan from shared links, grid clipped to place boundary, robust place-bounds parsing, validate-before-mutate on grid change. -->
+  <!-- iNatGaps draft by request. Visual conventions adapted from ALS93/iNatSort (GPL-3.0); see https://github.com/als93/iNatSort/blob/main/LICENSE. -->
+  <link rel="preconnect" href="https://api.inaturalist.org" crossorigin>
+  <title>iNatGaps — Find the gaps</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 19C5 10 10 4 20 4c0 10-6 15-15 15Z' fill='%2326653e'/%3E%3Cpath d='M5 19 15 9' stroke='%23eef3eb' stroke-width='1.5' fill='none'/%3E%3C/svg%3E">
+  <script>
+    try { if (localStorage.theme === 'dark' || (!('theme' in localStorage) && matchMedia('(prefers-color-scheme: dark)').matches)) document.documentElement.classList.add('dark'); } catch(e) {}
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    const cv = n => `rgb(var(--${n}) / <alpha-value>)`;
+    tailwind.config = { darkMode: 'class', theme: { extend: { colors: { bg: cv('bg'), surface: cv('surface'), fg: cv('fg'), muted: cv('muted'), line: cv('line'), accent: cv('accent'), danger: cv('danger') }, fontFamily: { serif: ['"Iowan Old Style"','"Palatino Linotype"','Georgia','serif'], sans: ['Seravek','"Gill Sans Nova"','Ubuntu','"Segoe UI"','system-ui','sans-serif'], mono: ['ui-monospace','SFMono-Regular','Menlo','monospace'] } } } };
+  </script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <style>
+    :root { --bg:238 243 235; --surface:250 252 248; --fg:24 38 30; --muted:91 108 96; --line:205 217 200; --accent:38 101 62; --danger:180 35 24; --purple:109 91 208; }
+    .dark { --bg:14 24 18; --surface:21 34 26; --fg:226 237 224; --muted:148 168 152; --line:40 58 46; --accent:125 190 140; --danger:232 125 110; }
+    * { box-sizing:border-box; }
+    html, body { margin:0; min-height:100%; background:rgb(var(--bg)); color:rgb(var(--fg)); }
+    body { font-family:Seravek,'Gill Sans Nova',Ubuntu,'Segoe UI',system-ui,sans-serif; }
+    .app { height:100vh; min-height:640px; display:flex; flex-direction:column; overflow:hidden; }
+    .topbar { flex:none; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:13px 20px; border-bottom:1px solid rgb(var(--line)); background:rgb(var(--surface)); }
+    .brand { display:flex; align-items:center; gap:9px; font-family:Georgia,serif; font-size:21px; font-weight:650; white-space:nowrap; }
+    .brand-mark { width:21px; height:21px; color:rgb(var(--accent)); }
+    .top-actions { display:flex; align-items:center; gap:8px; }
+    .btn { display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:8px 11px; border:1px solid rgb(var(--line)); border-radius:4px; background:transparent; color:rgb(var(--fg)); font-size:12px; font-weight:600; cursor:pointer; transition:background .15s,border-color .15s,opacity .15s; white-space:nowrap; }
+    .btn:hover { background:rgb(var(--muted) / .09); }
+    .btn:disabled { cursor:not-allowed; opacity:.45; }
+    .btn-solid { background:rgb(var(--accent)); border-color:rgb(var(--accent)); color:#fff; }
+    .dark .btn-solid { color:#102217; }
+    .btn-solid:hover { opacity:.9; background:rgb(var(--accent)); }
+    .btn-quiet { border-color:transparent; }
+    .btn-attn { box-shadow:0 0 0 2px rgb(var(--accent) / .35); }
+    .pill { display:inline-flex; align-items:center; gap:6px; font-size:10px; font-weight:750; letter-spacing:.06em; text-transform:uppercase; padding:4px 7px; border:1px solid rgb(var(--line)); border-radius:3px; color:rgb(var(--muted)); }
+    .pill::before { content:''; width:6px; height:6px; border-radius:50%; background:currentColor; }
+    .theme-sun { display:none; } .dark .theme-moon { display:none; } .dark .theme-sun { display:inline-block; }
+    .pill.live { color:rgb(var(--accent)); }
+    .layout { min-height:0; flex:1; display:grid; grid-template-columns:minmax(0, 1.7fr) minmax(320px, .9fr); }
+    .map-side { min-width:0; min-height:0; display:flex; flex-direction:column; padding:17px 18px 14px; border-right:1px solid rgb(var(--line)); gap:12px; }
+    .controls { display:grid; grid-template-columns:minmax(200px,1fr) minmax(112px,132px) minmax(120px,140px) minmax(120px,140px); gap:8px; align-items:start; }
+    .run-cell { grid-column:1 / -1; }
+    .draw-active { background:rgb(var(--accent) / .12); border-color:rgb(var(--accent)); color:rgb(var(--accent)); }
+    #map.drawing-boundary, #map.drawing-boundary .leaflet-container { cursor:crosshair !important; touch-action:none; }
+    .stats-toggle { width:100%; justify-content:space-between; margin-bottom:6px; padding:5px 10px; font-size:11px; color:rgb(var(--muted)); }
+    .stats-toggle i { transition:transform .15s; font-size:10px; }
+    #proto-panel .btn, #proto-panel .field { padding:2px 7px; font-size:10.5px; min-height:0; height:auto; line-height:1.4; }
+    #proto-panel label { display:inline-flex; align-items:center; gap:4px; }
+    @media (max-width: 900px) { .controls { grid-template-columns:repeat(2,minmax(0,1fr)); } .region-wrap { grid-column:1 / -1; } .run-cell { grid-column:1 / -1; flex-wrap:wrap; } }
+    .field-wrap { min-width:0; position:relative; }
+    .label { display:block; color:rgb(var(--muted)); font-size:11px; font-weight:650; margin:0 0 5px; }
+    .field { width:100%; padding:9px 10px; border:1px solid rgb(var(--line)); border-radius:4px; color:rgb(var(--fg)); background:rgb(var(--bg)); font:inherit; font-size:12px; min-width:0; outline:none; }
+    .field:focus { border-color:rgb(var(--accent)); box-shadow:0 0 0 1px rgb(var(--accent) / .18); }
+    .field option { background:rgb(var(--surface)); color:rgb(var(--fg)); }
+    .suggestions { position:absolute; top:100%; left:0; right:0; margin-top:3px; z-index:1000; max-height:230px; overflow:auto; border:1px solid rgb(var(--line)); border-radius:4px; background:rgb(var(--surface)); box-shadow:0 8px 24px #0002; }
+    .suggestion { display:block; padding:9px 11px; width:100%; text-align:left; border:0; border-bottom:1px solid rgb(var(--line)); background:transparent; color:rgb(var(--fg)); cursor:pointer; font-size:12px; }
+    .suggestion:last-child { border-bottom:0; }
+    .suggestion:hover { background:rgb(var(--accent) / .09); }
+    .help { color:rgb(var(--muted)); font-size:11px; line-height:1.45; }
+    .map-heading { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .section-title { font-family:Georgia,serif; font-size:17px; font-weight:650; }
+    .map-wrap { position:relative; flex:1; min-height:260px; border:1px solid rgb(var(--line)); border-radius:4px; overflow:hidden; background:rgb(var(--bg)); }
+    #map { position:absolute; inset:0; background:#e5ebdf; z-index:1; }
+    .dark #map { background:#18251b; }
+    .map-status { position:absolute; top:10px; left:10px; z-index:500; max-width:calc(100% - 20px); padding:7px 9px; background:rgb(var(--surface) / .94); border:1px solid rgb(var(--line)); border-radius:4px; font-size:11px; color:rgb(var(--muted)); box-shadow:0 1px 5px #0001; }
+    .legend { position:absolute; z-index:500; left:10px; bottom:10px; max-width:calc(100% - 20px); display:flex; flex-wrap:wrap; gap:10px; padding:8px 10px; border:1px solid rgb(var(--line)); border-radius:4px; background:rgb(var(--surface) / .95); font-size:10px; color:rgb(var(--muted)); }
+    .legend-item { display:flex; align-items:center; gap:5px; }
+    .swatch { width:10px; height:10px; border-radius:2px; flex:none; }
+    .stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+    .stat { border:1px solid rgb(var(--line)); border-radius:4px; padding:10px 11px; min-width:0; background:rgb(var(--surface)); }
+    .stat-label { font-size:10px; color:rgb(var(--muted)); margin-bottom:4px; }
+    .stat-value { font:600 21px Georgia,serif; line-height:1.15; }
+    .stat-note { color:rgb(var(--muted)); font-size:10px; margin-top:4px; }
+    .sidebar { min-width:0; min-height:0; display:flex; flex-direction:column; overflow-y:auto; padding:18px 17px; gap:14px; }
+    .side-head { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
+    .muted { color:rgb(var(--muted)); }
+    .small { font-size:11px; }
+    .rank-list { display:flex; flex-direction:column; border-top:1px solid rgb(var(--line)); max-height: min(44vh, 390px); min-height: 120px; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable; padding-right:4px; }
+    .rank-list::-webkit-scrollbar { width:8px; }
+    .rank-list::-webkit-scrollbar-thumb { background:rgb(var(--line)); border-radius:8px; border:2px solid rgb(var(--surface)); }
+    .rank-list::-webkit-scrollbar-thumb:hover { background:rgb(var(--muted) / .55); }
+    .rank-row { display:grid; grid-template-columns:28px minmax(0,1fr) auto; align-items:center; gap:9px; width:100%; padding:11px 2px; text-align:left; color:rgb(var(--fg)); background:transparent; border:0; border-bottom:1px solid rgb(var(--line)); cursor:pointer; }
+    .rank-row:hover { background:rgb(var(--muted) / .06); }
+    .rank-row.selected { background:rgb(var(--accent) / .09); }
+    .rank-num { width:25px; height:25px; display:flex; align-items:center; justify-content:center; border:1px solid rgb(var(--line)); border-radius:4px; font-size:11px; color:rgb(var(--muted)); }
+    .rank-name { font-size:12px; font-weight:700; }
+    .rank-sub { color:rgb(var(--muted)); font-size:10px; margin-top:3px; line-height:1.35; }
+    .rank-count { text-align:right; font-size:11px; font-weight:700; white-space:nowrap; }
+    .bar-track { height:4px; background:rgb(var(--line)); margin-top:7px; overflow:hidden; border-radius:3px; }
+    .bar-fill { height:100%; border-radius:3px; }
+    .divider { border:0; border-top:1px solid rgb(var(--line)); margin:0; }
+    .detail-box { border:1px solid rgb(var(--line)); border-radius:4px; background:rgb(var(--surface)); }
+    .detail-head { padding:12px; border-bottom:1px solid rgb(var(--line)); display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .detail-body { padding:12px; }
+    .detail-box.collapsed .detail-body { display:none; }
+    .detail-head-actions { display:flex; align-items:center; gap:7px; flex:none; }
+    .detail-toggle { width:28px; height:28px; padding:0; display:inline-flex; align-items:center; justify-content:center; border:1px solid rgb(var(--line)); border-radius:4px; background:transparent; color:rgb(var(--fg)); cursor:pointer; }
+    .detail-toggle:hover { background:rgb(var(--muted) / .09); }
+    .detail-toggle i { transition:transform .15s ease; }
+    .detail-box.collapsed .detail-toggle i { transform:rotate(-90deg); }
+    .mini-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin-bottom:12px; }
+    .mini-stat { padding:8px; background:rgb(var(--bg)); border-radius:3px; }
+    .mini-stat strong { display:block; font-size:16px; font-family:Georgia,serif; font-weight:650; }
+    .mini-stat span { color:rgb(var(--muted)); font-size:9px; }
+    .species-list { display:flex; flex-direction:column; gap:0; margin:7px 0 12px; }
+    .species-item { display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px solid rgb(var(--line)); font-size:11px; }
+    .species-item:last-child { border-bottom:0; }
+    .species-link { color:rgb(var(--accent)); text-decoration:none; }
+    .species-link:hover { text-decoration:underline; }
+    .footer-status { flex:none; padding:7px 18px; border-top:1px solid rgb(var(--line)); background:rgb(var(--surface)); display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:10px; color:rgb(var(--muted)); }
+    .progress-track { height:3px; width:100%; background:rgb(var(--line)); overflow:hidden; margin-top:5px; border-radius:4px; }
+    .progress-fill { width:0; height:100%; background:rgb(var(--accent)); transition:width .15s; }
+    .notice { position:fixed; left:50%; top:68px; transform:translateX(-50%); width:min(92vw,490px); padding:11px 14px; border:1px solid rgb(var(--line)); background:rgb(var(--surface)); box-shadow:0 4px 20px #0002; border-radius:4px; z-index:2000; font-size:12px; }
+    .notice.error { border-color:rgb(var(--danger)); color:rgb(var(--danger)); }
+    .hidden { display:none !important; }
+    .leaflet-container { font-family:inherit; color:#1b2a20; }
+    .leaflet-popup-content-wrapper,.leaflet-popup-tip { background:rgb(var(--surface)); color:rgb(var(--fg)); }
+    .leaflet-popup-content { font-family:inherit; font-size:12px; }
+    .leaflet-control-attribution { font-size:9px !important; }
+    .fallback-grid { position:absolute; inset:0; display:none; padding:44px 10px 55px; grid-template-columns:repeat(8,1fr); grid-auto-rows:minmax(18px,1fr); gap:4px; background-image:linear-gradient(35deg,transparent 49.6%,#a8baa5 50%,transparent 50.4%),linear-gradient(120deg,transparent 49.6%,#a8baa5 50%,transparent 50.4%); background-size:70px 80px; }
+    .fallback-cell { border:1px solid #ffffffaa; border-radius:3px; min-width:0; cursor:pointer; color:#fff; font-size:9px; display:flex; align-items:center; justify-content:center; text-shadow:0 1px 2px #0009; }
+    .fallback-cell.selected { outline:2px solid rgb(var(--accent)); outline-offset:1px; }
+    .empty { text-align:center; color:rgb(var(--muted)); padding:18px 10px; font-size:11px; line-height:1.5; }
+    @media (max-width:1050px) and (min-width:761px) { .layout { grid-template-columns:minmax(0,1.2fr) minmax(300px,.85fr); } .controls { grid-template-columns:repeat(2,minmax(0,1fr)); } .controls .region-wrap, .controls .run-cell { grid-column:1 / -1; }
+    }
+    @media (max-width:760px) { .app { height:auto; min-height:100vh; overflow:visible; } .topbar { padding:11px 13px; } .top-actions .hide-mobile { display:none; } .layout { display:flex; flex-direction:column; overflow:visible; } .map-side { padding:13px; border-right:0; border-bottom:1px solid rgb(var(--line)); min-height:650px; } .sidebar { overflow:visible; padding:15px 13px; } .controls { grid-template-columns:minmax(0,1fr) 1fr; } .controls .region-wrap { grid-column:span 2; } .controls .run-cell { grid-column:span 2; } .map-wrap { min-height:360px; flex:none; } .stats { gap:6px; } .stat { padding:8px; } .stat-value { font-size:18px; } .footer-status { position:static; } }
+    @media (max-width:400px) { .brand { font-size:18px; } .pill { font-size:9px; } .top-actions { gap:4px; } .btn { padding:7px 8px; } }
+  </style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div style="display:flex;align-items:center;gap:12px;min-width:0">
+      <h1 class="brand" title="iNatGaps"><svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19C5 10 10 4 20 4c0 10-6 15-15 15Z" fill="currentColor"/><path d="M5 19 15 9" stroke="rgb(var(--bg))" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>iNatGaps</h1>
+      <span id="mode-pill" class="pill">No data yet</span>
+    </div>
+    <div class="top-actions">
+      <span class="hide-mobile small muted" title="Results may be live or cached">Sampling bias explorer</span>
+      <button class="btn" data-action="toggle-theme" aria-label="Toggle dark mode" title="Toggle theme"><i class="fa-solid fa-moon theme-moon"></i><i class="fa-solid fa-sun theme-sun"></i><span class="hide-mobile">Theme</span></button>
+      <a class="btn" href="https://www.inaturalist.org/observations" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-arrow-up-right-from-square"></i><span class="hide-mobile">iNaturalist</span></a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="map-side">
+      <div>
+        <div class="map-heading" style="margin-bottom:5px">
+          <div class="section-title">Sampling Gap Explorer</div>
+          <span id="region-status" class="small muted">No region selected</span>
+        </div>
+        <p class="help" style="margin:0 0 12px">Basemap + sampling grid. Colors show record counts, not biodiversity. Select a cell to inspect it and plan a survey.</p>
+        <div class="controls">
+          <div class="field-wrap region-wrap">
+            <label class="label" for="region-search">Region or place</label>
+            <input id="region-search" class="field" type="search" placeholder="Search California, a county, or a park…" autocomplete="off" aria-label="Search iNaturalist places">
+            <div id="place-suggestions" class="suggestions hidden" role="listbox"></div>
+          </div>
+          <div class="field-wrap">
+            <label class="label" id="grid-label" for="grid-size">Grid cell</label>
+            <select id="grid-size" class="field" aria-label="Grid cell size">
+              <option value="0.1">100 m · micro</option><option value="0.25">250 m · tiny areas</option><option value="0.5">500 m · small parks</option><option value="0.75">750 m · very small areas</option><option value="1">1 km · ultra fine</option><option value="1.5">1.5 km</option><option value="2">2 km</option><option value="2.5">2.5 km · very fine</option><option value="5">5 km · fine</option><option value="7.5">7.5 km</option><option value="10">10 km</option><option value="15">15 km</option><option value="20">20 km</option><option value="25" selected>25 km</option><option value="35">35 km</option><option value="50">50 km</option><option value="75">75 km</option><option value="100">100 km · broad</option><option value="150">150 km · very broad</option>
+            </select>
+          </div>
+          <div class="field-wrap">
+            <label class="label" for="taxon-filter">Taxon group</label>
+            <select id="taxon-filter" class="field">
+              <option value="">All taxa</option><option value="47126">Plants</option><option value="3">Birds</option><option value="47158">Insects</option><option value="47170">Fungi</option><option value="40151">Mammals</option><option value="20978">Amphibians</option><option value="26036">Reptiles</option>
+            </select>
+          </div>
+          <div class="field-wrap">
+            <label class="label" for="period-preset">Observation period</label>
+            <select id="period-preset" class="field">
+              <option value="all" selected>All dates</option><option value="last12">Last 12 months</option><option value="last5">Last 5 years</option><option value="thisyear">This year</option><option value="lastyear">Previous year</option><option value="custom">Custom range…</option>
+            </select>
+            <div id="period-custom" class="hidden" style="display:flex;gap:6px;margin-top:6px">
+              <input id="date-from" type="date" class="field" style="min-width:0" aria-label="Observed on or after">
+              <input id="date-to" type="date" class="field" style="min-width:0" aria-label="Observed on or before">
+            </div>
+            <div id="period-note" class="help hidden" style="margin-top:4px">All dates</div>
+          </div>
+          <div class="run-cell" style="display:flex;gap:7px;align-items:center">
+            <button id="analyze-btn" class="btn btn-solid" data-action="analyze"><i class="fa-solid fa-magnifying-glass-chart"></i> Analyze live region</button>
+            <button id="draw-boundary-btn" class="btn" data-action="draw-boundary" title="Draw a custom rectangular analysis area on the map"><i class="fa-regular fa-square"></i> Draw boundary</button>
+            <button class="btn" data-action="upload-boundary" title="Load a boundary from a GeoJSON or KML file"><i class="fa-solid fa-file-arrow-up"></i> Upload boundary</button><input id="boundary-file" type="file" accept=".geojson,.json,.kml,.zip,.shp,application/geo+json,application/json,application/vnd.google-earth.kml+xml" class="hidden" aria-label="Boundary file">
+            <button id="stop-btn" class="btn hidden" data-action="cancel" title="Cancel current scan"><i class="fa-solid fa-stop"></i> Stop</button>
+            <button class="btn btn-quiet" data-action="analyze-fresh" title="Ignore saved counts and re-query iNaturalist"><i class="fa-solid fa-arrows-rotate"></i> Fresh</button>
+            <label class="help" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer" title="Beta: count whole map tiles in one request each, for much larger areas and finer cells"><input type="checkbox" id="fast-mode"> Fast mode (beta)</label>
+            <label id="smart-wrap" class="help" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer" title="Query coarse blocks first and skip blocks with zero observations"><input type="checkbox" id="smart-scan" checked> Skip empty areas</label>
+            <span id="scan-estimate" class="help" style="margin-left:auto" aria-live="polite"></span>
+          </div>
+        </div>
+        <details id="proto-panel" class="help hidden" style="margin-top:6px;padding:4px 8px;border:1px solid rgb(var(--line));border-radius:4px;font-size:10.5px">
+          <summary style="cursor:pointer"><strong>Fast mode diagnostics</strong> · tile counts vs live API</summary>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:5px 0">
+            <button class="btn" data-action="proto-tilecheck" title="Compare one tile's decoded total with /observations for the same box">Check one tile</button>
+            <button class="btn" data-action="proto-cellcheck" title="Compare the selected cell's tile count with /observations for the same box">Check selected cell</button>
+            <label>Endpoint <select id="proto-endpoint" class="field" style="width:auto"><option value="grid">/grid</option><option value="heatmap">/heatmap</option></select></label>
+            <label>Host <select id="proto-host" class="field" style="width:auto"><option value="api">api.inaturalist.org</option><option value="tiles">tiles.inaturalist.org</option></select></label>
+          </div>
+          <pre id="proto-log" tabindex="0" aria-label="Fast mode log" style="margin:0 0 2px;height:72px;min-height:36px;max-height:240px;overflow:auto;resize:vertical;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.4;padding:4px 6px;background:rgb(var(--surface));border:1px solid rgb(var(--line));border-radius:3px"></pre>
+        </details>
+
+        <div id="region-help" class="help" style="margin-top:7px">Search for a place and select a result, or draw a boundary on the map, then run a live scan.</div>
+      </div>
+
+      <div class="map-heading">
+        <span class="section-title" style="font-size:15px">Observation coverage</span>
+        <span id="coverage-count" class="small muted">— cells</span>
+      </div>
+      <div class="map-wrap">
+        <div id="map" aria-label="Sampling coverage map"></div>
+        <div id="fallback-grid" class="fallback-grid" aria-label="Fallback sampling grid"></div>
+        <div id="map-status" class="map-status">Loading map…</div>
+        <div class="legend" aria-label="Map legend">
+          <span class="legend-item"><span class="swatch" style="background:#6d5bd0"></span>Zero records</span>
+          <span class="legend-item"><span class="swatch" style="background:#3985a4"></span>Very low</span>
+          <span class="legend-item"><span class="swatch" style="background:#7b9d69"></span>Moderate</span>
+          <span class="legend-item"><span class="swatch" style="background:#d4a34e"></span>High</span>
+          <span class="legend-item"><span class="swatch" style="background:#bd665b"></span>Most records</span>
+        </div>
+      </div>
+      <div>
+        <button id="stats-toggle" type="button" class="btn btn-quiet stats-toggle" data-action="toggle-stats" aria-expanded="true" aria-controls="stats-grid" title="Show or hide the summary cards to give the map more room"><span id="stats-summary">Summary</span><i class="fa-solid fa-chevron-down" id="stats-chevron"></i></button>
+        <div class="stats" id="stats-grid">
+          <div class="stat"><div class="stat-label">Grid cells</div><div id="stat-cells" class="stat-value">—</div><div class="stat-note">Inside the selected area</div></div>
+          <div class="stat"><div class="stat-label">Zero-record cells</div><div id="stat-zero" class="stat-value">—</div><div class="stat-note">No matching records found</div></div>
+          <div class="stat"><div class="stat-label">Cell observations</div><div id="stat-observations" class="stat-value">—</div><div class="stat-note">Sum of queried cell counts</div></div>
+        </div>
+        <div id="scan-progress-wrap" class="hidden" style="margin-top:8px">
+          <div style="display:flex;justify-content:space-between;gap:8px" class="small muted"><span id="scan-progress-label">Querying cells…</span><span id="scan-progress-num">0 / 0</span></div>
+          <div class="progress-track"><div id="scan-progress-bar" class="progress-fill"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="side-head">
+        <div><div class="section-title">Grid cells · ranked</div><p class="help" style="margin:4px 0 0">Every grid square is listed here, ranked by survey priority. Scroll to browse all cells and select one to inspect it.</p></div>
+        <div style="display:flex;gap:6px"><button class="btn" data-action="export-csv" title="Export grid cells as CSV"><i class="fa-solid fa-file-csv"></i> CSV</button><button class="btn" data-action="export-geojson" title="Export grid cells as GeoJSON (opens in QGIS, geojson.io, etc.)"><i class="fa-solid fa-draw-polygon"></i> GeoJSON</button></div>
+      </div>
+      <div id="rank-summary" class="small muted">Select a place to list and rank its grid cells.</div>
+      <div id="rank-list" class="rank-list"></div>
+      <div id="selected-detail" class="detail-box">
+        <div class="detail-head"><div><div class="label">SELECTED GRID CELL</div><div id="detail-title" style="font-family:Georgia,serif;font-size:17px;font-weight:650;margin-top:3px">Cell A-01</div><div id="detail-coords" class="small muted" style="margin-top:4px">Coordinates loading…</div></div><div class="detail-head-actions"><span id="priority-badge" class="pill">Priority —</span><button id="detail-toggle" class="detail-toggle" type="button" aria-label="Collapse selected grid cell details" aria-expanded="true" title="Collapse details"><i class="fa-solid fa-chevron-down"></i></button></div></div>
+        <div class="detail-body">
+          <div class="mini-stats">
+            <div class="mini-stat"><strong id="detail-count">—</strong><span>Observations</span></div>
+            <div class="mini-stat"><strong id="detail-species">—</strong><span>Species</span></div>
+            <div class="mini-stat"><strong id="detail-observers">—</strong><span>Observers</span></div>
+          </div>
+          <div class="label">SPECIES RECORDED IN THIS CELL</div>
+          <div id="detail-species-list" class="species-list"><div class="small muted">Select a cell to view species evidence.</div></div>
+          <p id="detail-caveat" class="help" style="margin:5px 0 12px">A low count does not prove that biodiversity is low.</p>
+          <div style="display:flex;gap:7px;flex-wrap:wrap">
+            <button class="btn" data-action="open-inat"><i class="fa-solid fa-arrow-up-right-from-square"></i> Explore on iNat</button>
+          </div>
+        </div>
+      </div>
+      <div class="help">Priority is a survey-planning estimate, not a biodiversity measurement or a probability of species presence. Public access, terrain, habitat, and safety should be checked before visiting.</div>
+    </aside>
+  </main>
+  <footer class="footer-status"><span id="footer-message">Search for a place to begin</span><span id="footer-right">iNatGaps · sampling-bias explorer</span></footer>
+</div>
+<div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+(() => {
+  'use strict';
+  const API = 'https://api.inaturalist.org/v1';
+  const MAX_CELLS = 150; // each cell is one API request, so this keeps a full scan to a few minutes
+  const CONCURRENCY = 5; // requests are also paced by takeSlot(); this only overlaps network latency
+  const RATE_MS = 1100; // ~55 requests/min, under iNaturalist's published ~60/min guidance
+  const CACHE_TTL = 24*60*60*1000; // saved counts stay valid for a day
+  const MAX_CACHE = 8000; // saved count entries kept in memory and in localStorage
+  const STORE_KEY = 'inatgaps.counts.v1';
+  const RAW_CELL_CAP = MAX_CELLS * 8; // bounding-box cells generated before clipping to a place boundary
+    const COLORS = { gap:'#6d5bd0', low:'#3985a4', moderate:'#7b9d69', high:'#d4a34e', hotspot:'#bd665b' };
+  const TAXA_NAMES = {'':'All taxa','47126':'Plants','3':'Birds','47158':'Insects','47170':'Fungi','40151':'Mammals','20978':'Amphibians','26036':'Reptiles'};
+  const state = {
+    mode:'idle', regionName:'', place:null, bounds:null, cells:[], selectedId:null,
+    map:null, gridLayer:null, cellLayers:new Map(), tileLayer:null, topoLayer:null, boundaryLayer:null, boundaryKey:null, searchTimer:null, activeController:null, scanId:0, detailController:null,
+    scanInProgress:false, lastUpdated:null, fallbackMap:false, placeGeometry:null, placePolys:null, stale:false, lastScan:null, cellsClipped:0, requestCache:new Map(), placeCache:new Map(), detailCache:new Map(),
+    manualDrawing:false, drawStartLatLng:null, drawPreviewLayer:null, drawPointerId:null, didFit:false
+  };
+  const $ = id => document.getElementById(id);
+  const KM_PER_DEG = 111.32;
+  const dimsKm = b => { const lat=(b.swlat+b.nelat)/2; return {h:(b.nelat-b.swlat)*KM_PER_DEG, w:(b.nelng-b.swlng)*KM_PER_DEG*Math.max(.12,Math.cos(lat*Math.PI/180))}; };
+  const tooManyMsg = (requested,grid) => `A ${requested} km grid would create ${number(grid.totalCells)} cells, above the ${MAX_CELLS}-cell safety limit. Choose a larger cell size or a smaller region.`;
+  let searchSeq = 0;
+  const number = n => Number(n || 0).toLocaleString();
+  const fmtAge = ms => { const m=Math.round(ms/60000); return m<2?'moments':m<90?`${m} min`:`${Math.round(m/60)} h`; };
+  const fmtDuration = ms => { const sec=Math.round(ms/1000); return sec<90?`${sec} s`:`${Math.round(sec/60)} min`; };
+  function resetScanUI() { $('scan-progress-wrap').classList.add('hidden'); $('stop-btn').classList.add('hidden'); $('analyze-btn').disabled=false; }
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const cacheRead = (map,key,maxAge) => { const entry = map.get(key); if (!entry || Date.now()-entry.at>maxAge) return null; return entry.value; };
+  const cacheWrite = (map,key,value,max=500) => { map.delete(key); map.set(key,{value,at:Date.now()}); while(map.size>max) map.delete(map.keys().next().value); };
+  const cacheEntry = (map,key,maxAge) => { const entry = map.get(key); if (!entry || Date.now()-entry.at>maxAge) return null; return entry; };
+  // Compact, stable key for one count query (bounds to ~0.1 m, taxon, date range, verifiable flag).
+  const countKey = p => [p.swlat,p.swlng,p.nelat,p.nelng].map(v=>Number(v).toFixed(6)).join(',')+'|'+(p.taxon_id||'')+'|'+(p.d1||'')+'|'+(p.d2||'')+'|'+(p.verifiable?1:0);
+  // Counts survive reloads: loaded once at start, written (debounced) after new results and when the tab is hidden.
+  function loadPersistedCounts() {
+    try {
+      const obj=JSON.parse(localStorage.getItem(STORE_KEY)||'null'); if(!obj || obj.v!==1 || !Array.isArray(obj.e)) return;
+      const now=Date.now(); for(const [k,v,at] of obj.e) if(typeof k==='string' && Number.isFinite(v) && Number.isFinite(at) && now-at<CACHE_TTL) state.requestCache.set(k,{value:v,at});
+    } catch(e) {}
+  }
+  let persistTimer=null;
+  function schedulePersist() { clearTimeout(persistTimer); persistTimer=setTimeout(persistCounts,2000); }
+  function persistCounts() {
+    clearTimeout(persistTimer);
+    try {
+      const now=Date.now(), m=new Map();
+      try { const o=JSON.parse(localStorage.getItem(STORE_KEY)||'null'); if(o && o.v===1 && Array.isArray(o.e)) for(const x of o.e) if(typeof x[0]==='string' && Number.isFinite(x[1]) && Number.isFinite(x[2]) && now-x[2]<CACHE_TTL) m.set(x[0],x); } catch(e) {}
+      for(const [k,v] of state.requestCache) if(now-v.at<CACHE_TTL) m.set(k,[k,v.value,v.at]);
+      const e=[...m.values()].sort((a,b)=>a[2]-b[2]).slice(-MAX_CACHE);
+      localStorage.setItem(STORE_KEY,JSON.stringify({v:1,e}));
+    } catch(err) {} // storage may be unavailable or full; the in-memory cache still works
+  }
+
+  function toggleTheme() {
+    const dark = document.documentElement.classList.toggle('dark');
+    try { localStorage.theme = dark ? 'dark' : 'light'; } catch(e) {}
+    const btn = document.querySelector('[aria-label="Toggle dark mode"]');
+    if (btn) { const moon=btn.querySelector('.fa-moon'),sun=btn.querySelector('.fa-sun'); if(moon) moon.classList.toggle('hidden',dark); if(sun) sun.classList.toggle('hidden',!dark); }
+  }
+
+  let noticeTimer;
+  function notice(message,isError=false) {
+    const el=$('notice'); el.textContent=message; el.classList.toggle('error',isError); el.classList.remove('hidden'); clearTimeout(noticeTimer); noticeTimer=setTimeout(()=>el.classList.add('hidden'),6500);
+  }
+  function setStatus(message,right) { $('footer-message').textContent=message; if(right) $('footer-right').textContent=right; }
+  function setMode(mode) { state.mode=mode; renderModePill(); }
+  function renderModePill() {
+    const mode=state.mode, pill=$('mode-pill');
+    pill.textContent=state.stale?'Stale · re-run needed':mode==='live'?'Live Data':mode==='cached'?'Cached Data':'No data yet';
+    pill.className='pill'+(mode==='idle'||state.stale?'':' live');
+  }
+  // Results are stale when the taxon/period filters differ from the ones the last scan used.
+  function refreshStale() {
+    const f=readFilters(), ls=state.lastScan;
+    const on=!!(ls && (state.mode==='live'||state.mode==='cached') && (ls.taxon!==f.taxon||ls.d1!==f.d1||ls.d2!==f.d2||!!ls.fast!==fastOn()));
+    state.stale=on;
+    const b=$('analyze-btn');
+    b.innerHTML=on?'<i class="fa-solid fa-rotate"></i> Re-run analysis':'<i class="fa-solid fa-magnifying-glass-chart"></i> Analyze live region';
+    b.classList.toggle('btn-attn',on);
+    renderModePill();
+  }
+  const smartOn = () => { const el=$('smart-scan'); return !el || el.checked; };
+  // Group cells 2x2 into coarser blocks (up to 4 levels) so a block with zero observations rules out all of its cells at once.
+  function buildScanLevels(cells,smart) {
+    const level0=cells.map(c=>({level:0,r:c.row,c:c.col,bounds:c.bounds,cell:c,kids:[],fine:1}));
+    const levels=[level0];
+    if(!smart) return levels;
+    while(levels.length<5) {
+      const prev=levels[levels.length-1]; if(prev.length<=6) break;
+      const groups=new Map();
+      for(const n of prev) {
+        const r=n.r>>1, c=n.c>>1, key=r+'-'+c; let g=groups.get(key);
+        if(!g) { g={level:levels.length,r,c,bounds:{swlat:Infinity,swlng:Infinity,nelat:-Infinity,nelng:-Infinity},kids:[],fine:0}; groups.set(key,g); }
+        g.kids.push(n); n.parent=g; g.fine+=n.fine; const b=n.bounds, gb=g.bounds;
+        if(b.swlat<gb.swlat) gb.swlat=b.swlat; if(b.swlng<gb.swlng) gb.swlng=b.swlng; if(b.nelat>gb.nelat) gb.nelat=b.nelat; if(b.nelng>gb.nelng) gb.nelng=b.nelng;
+      }
+      const next=[...groups.values()];
+      const area=x=>(x.nelat-x.swlat)*(x.nelng-x.swlng);
+      for(const g of next) { const sum=g.kids.reduce((t,k)=>t+area(k.bounds),0), whole=area(g.bounds); g.tiles=Math.abs(sum-whole)<=whole*1e-6; } // children exactly fill the block (no clipped holes)
+      if(next.length>=prev.length) break; levels.push(next);
+    }
+    return levels;
+  }
+  // Upper bound on requests: every node must be queried unless its count is saved, and saved zeros prune their subtree.
+  function planRequests(levels,filters,ignoreCache) {
+    let need=0;
+    const visit=n=>{
+      const hit=ignoreCache?null:cacheEntry(state.requestCache,countKey(queryParamsForCell(n,{per_page:1,only_id:true},filters)),CACHE_TTL);
+      if(hit===null) need++;
+      if(n.level>0 && (hit===null || hit.value>0)) n.kids.forEach(visit);
+    };
+    levels[levels.length-1].forEach(visit);
+    return need;
+  }
+  function estimateTextCells(filters=readFilters()) {
+    const levels=buildScanLevels(state.cells,smartOn()), need=planRequests(levels,filters,false), smart=levels.length>1;
+    if(!need) return 'counts saved · re-run is instant';
+    return `${smart?'up to ':''}≈${number(need)} request${need===1?'':'s'} · ~${fmtDuration(need*RATE_MS)}${smart?' (fewer if areas are empty)':''}`;
+  }
+  function updateEstimate() { const el=$('scan-estimate'); if(el) el.textContent=(state.cells.length && !state.scanInProgress)?estimateText():''; }
+  function apiURL(path,params={}) { const u=new URL(API+path); Object.entries(params).forEach(([k,v])=>{if(v!==''&&v!==null&&v!==undefined)u.searchParams.set(k,v)}); return u.toString(); }
+  async function apiFetch(url,signal,timeoutMs=15000) {
+    const controller=new AbortController();
+    let timedOut=false;
+    const timeout=setTimeout(()=>{timedOut=true;controller.abort();},timeoutMs);
+    const relay=()=>controller.abort(signal.reason || new DOMException('Cancelled','AbortError'));
+    if(signal) { if(signal.aborted) relay(); else signal.addEventListener('abort',relay,{once:true}); }
+    try {
+      const response=await fetch(url,{signal:controller.signal,headers:{'Accept':'application/json'}});
+      if(response.status===429) { const err=new Error('iNaturalist rate limit (HTTP 429)'); err.retryable=true; const ra=Number(response.headers.get('Retry-After')); if(Number.isFinite(ra)&&ra>0) err.retryAfterMs=ra*1000; throw err; }
+      if(response.status>=500) { const err=new Error(`iNaturalist server error (HTTP ${response.status})`); err.retryable=true; throw err; }
+      if(!response.ok) { const err=new Error(`iNaturalist returned HTTP ${response.status}`); err.retryable=false; throw err; }
+      return await response.json();
+    } catch(err) {
+      if(signal?.aborted) throw new DOMException('Cancelled','AbortError');
+      if(timedOut) { const timeoutErr=new Error('iNaturalist request timed out'); timeoutErr.retryable=true; throw timeoutErr; }
+      if(err.name==='TypeError') err.retryable=true; // transient network failure
+      throw err;
+    } finally { clearTimeout(timeout); if(signal) signal.removeEventListener('abort',relay); }
+  }
+  const waitForRetry = (ms,signal) => new Promise((resolve,reject)=>{
+    if(signal.aborted) { reject(new DOMException('Cancelled','AbortError')); return; }
+    const timer=setTimeout(done,ms);
+    function done(){signal.removeEventListener('abort',cancel);resolve();}
+    function cancel(){clearTimeout(timer);signal.removeEventListener('abort',cancel);reject(new DOMException('Cancelled','AbortError'));}
+    signal.addEventListener('abort',cancel,{once:true});
+  });
+  // Shared pacing for cell-count requests: one request per RATE_MS across all workers, plus one global pause when iNaturalist answers 429.
+  let nextSlot=0, pausedUntil=0;
+  async function takeSlot(signal,skip) {
+    for(;;) {
+      if(signal.aborted) throw new DOMException('Cancelled','AbortError');
+      if(skip && skip()) return false; // answer became derivable while waiting: give the slot to someone else
+      const now=Date.now(), at=Math.max(now,nextSlot,pausedUntil);
+      if(at<=now) { nextSlot=now+RATE_MS; return true; }
+      await waitForRetry(skip?Math.min(at-now,250):at-now,signal);
+    }
+  }
+  // Returns the JSON body, or null if skip() became true before a slot was taken (no request is sent then).
+  async function fetchCellCount(params,signal,skip) {
+    let lastError;
+    for(let attempt=0;attempt<4;attempt++) {
+      if(signal.aborted) throw new DOMException('Cancelled','AbortError');
+      try { if(!(await takeSlot(signal,skip))) return null; return await apiFetch(apiURL('/observations',params),signal); }
+      catch(err) {
+        lastError=err;
+        if(signal.aborted || err.name==='AbortError') throw new DOMException('Cancelled','AbortError');
+        if(attempt===3 || err.retryable===false) throw err;
+        if(/429|rate limit/i.test(err.message)) {
+          // All workers honour one shared pause, so a 429 slows the whole scan instead of only this request.
+          const wait=Math.max(err.retryAfterMs||0,5000*Math.pow(2,attempt))+Math.random()*1000;
+          pausedUntil=Math.max(pausedUntil,Date.now()+wait);
+          setStatus(`iNaturalist asked us to slow down · pausing about ${Math.round(wait/1000)} s`);
+        } else await waitForRetry(500*Math.pow(2,attempt)+Math.random()*250,signal);
+      }
+    }
+    throw lastError;
+  }
+  async function fetchPaced(url,signal) {
+    let lastError;
+    for(let attempt=0;attempt<4;attempt++) {
+      if(signal.aborted) throw new DOMException('Cancelled','AbortError');
+      try { if(!(await takeSlot(signal))) return null; return await apiFetch(url,signal); }
+      catch(err) {
+        lastError=err;
+        if(signal.aborted || err.name==='AbortError') throw new DOMException('Cancelled','AbortError');
+        if(attempt===3 || err.retryable===false) throw err;
+        if(/429|rate limit/i.test(err.message)) {
+          // All workers honour one shared pause, so a 429 slows the whole scan instead of only this request.
+          const wait=Math.max(err.retryAfterMs||0,5000*Math.pow(2,attempt))+Math.random()*1000;
+          pausedUntil=Math.max(pausedUntil,Date.now()+wait);
+          setStatus(`iNaturalist asked us to slow down · pausing about ${Math.round(wait/1000)} s`);
+        } else await waitForRetry(500*Math.pow(2,attempt)+Math.random()*250,signal);
+      }
+    }
+    throw lastError;
+  }
+  const GEO_TYPES=new Set(['Polygon','MultiPolygon','Feature','FeatureCollection','GeometryCollection']);
+  // Extent [swlat,swlng,nelat,nelng] of any GeoJSON geometry (Polygon, MultiPolygon, Feature, collections).
+  function geoExtent(g) {
+    let minLat=Infinity,minLng=Infinity,maxLat=-Infinity,maxLng=-Infinity;
+    const coords=c=>{ if(!Array.isArray(c)) return; if(typeof c[0]==='number' && typeof c[1]==='number') { if(c[1]<minLat) minLat=c[1]; if(c[1]>maxLat) maxLat=c[1]; if(c[0]<minLng) minLng=c[0]; if(c[0]>maxLng) maxLng=c[0]; } else c.forEach(coords); };
+    const walk=o=>{ if(!o||typeof o!=='object') return; if(o.type==='FeatureCollection') (o.features||[]).forEach(walk); else if(o.type==='Feature') walk(o.geometry); else if(o.type==='GeometryCollection') (o.geometries||[]).forEach(walk); else coords(o.coordinates); };
+    walk(g);
+    return Number.isFinite(minLat)?[minLat,minLng,maxLat,maxLng]:null;
+  }
+  function placeBounds(place) {
+    if(!place || typeof place!=='object') return null;
+    // iNaturalist returns bounds in several shapes across its v1 and legacy endpoints; try GeoJSON first, then flat swlat/swlng fields.
+    const candidates=[place.bounding_box_geojson,place.bounding_box,place.bounds,place.boundingBox,place,place.geometry_geojson,place.geojson,place.geometry];
+    const valid=(swlat,swlng,nelat,nelng)=>[swlat,swlng,nelat,nelng].every(Number.isFinite) && swlat<nelat && swlng<nelng && swlat>=-90 && nelat<=90 && swlng>=-180 && nelng<=180;
+    for(let b of candidates) {
+      if(!b) continue;
+      if(typeof b==='string') { try { b=JSON.parse(b); } catch { continue; } }
+      let vals;
+      if(Array.isArray(b)) vals=b.length>=4?[b[1],b[0],b[3],b[2]]:null;
+      else if(GEO_TYPES.has(b.type)) vals=geoExtent(b);
+      else vals=[b.swlat ?? b.southwest_latitude ?? b.southwest?.lat,b.swlng ?? b.southwest_longitude ?? b.southwest?.lng,b.nelat ?? b.northeast_latitude ?? b.northeast?.lat,b.nelng ?? b.northeast_longitude ?? b.northeast?.lng];
+      if(vals) { const [swlat,swlng,nelat,nelng]=vals.map(Number); if(valid(swlat,swlng,nelat,nelng)) return {swlat,swlng,nelat,nelng}; }
+    }
+    return null;
+  }
+  function normalizePlace(p) {
+    const bounds=placeBounds(p);
+    return {id:p.id,name:p.display_name||p.name||`Place ${p.id}`,shortName:p.name||p.display_name||`Place ${p.id}`,bounds,raw:p};
+  }
+  function hideSuggestions() { $('place-suggestions').classList.add('hidden'); $('place-suggestions').replaceChildren(); }
+  function renderSuggestions(items) { renderSuggestionsBase(items); addOsmFooter(); }
+  function renderSuggestionsBase(items) {
+    const box=$('place-suggestions'); box.replaceChildren();
+    if(!items.length) { box.innerHTML='<div class="suggestion muted">No places found. Try a county, state, or park name.</div>'; box.classList.remove('hidden'); return; }
+    items.slice(0,8).forEach(item=>{
+      const p=normalizePlace(item); const btn=document.createElement('button'); btn.className='suggestion'; btn.type='button'; btn.setAttribute('role','option');
+      const primary=document.createElement('div'); primary.textContent=p.name; primary.style.fontWeight='650';
+      const secondary=document.createElement('div'); secondary.className='muted'; secondary.style.fontSize='10px'; secondary.style.marginTop='3px'; secondary.textContent=p.bounds?'iNaturalist place · boundary available':'iNaturalist place · boundary lookup needed';
+      btn.append(primary,secondary); btn.addEventListener('click',()=>selectPlace(p)); box.appendChild(btn);
+    });
+    box.classList.remove('hidden');
+  }
+  async function searchPlaces(query) {
+    const seq=++searchSeq; const clean=query.trim(); if(clean.length<2) { hideSuggestions(); return; }
+    const cacheKey=clean.toLowerCase(); const cached=cacheRead(state.placeCache,cacheKey,10*60*1000); if(cached) { renderSuggestions(cached); return; }
+    try {
+      let results=[];
+      try {
+        const data=await apiFetch(apiURL('/places/autocomplete',{q:clean,per_page:8}));
+        results=Array.isArray(data.results)?data.results:[];
+      } catch {
+        // Legacy endpoint fallback: its place records commonly include swlat/swlng/nelat/nelng directly.
+        const legacy=await apiFetch(`https://www.inaturalist.org/places.json?q=${encodeURIComponent(clean)}&per_page=8`);
+        results=Array.isArray(legacy)?legacy:(legacy.results||[]);
+      }
+      cacheWrite(state.placeCache,cacheKey,results,80); if(seq===searchSeq) renderSuggestions(results);
+    } catch(err) {
+      if(err.name!=='AbortError' && seq===searchSeq) { $('place-suggestions').innerHTML='<div class="suggestion muted">Place search is unavailable. Check your connection, or draw a boundary on the map instead.</div>'; $('place-suggestions').classList.remove('hidden'); addOsmFooter(); }
+    }
+  }
+  $('region-search').addEventListener('input',e=>{ if(state.place && e.target.value.trim()!==state.place.name) state.place=null; clearTimeout(state.searchTimer); state.searchTimer=setTimeout(()=>searchPlaces(e.target.value),320); });
+  document.addEventListener('click',e=>{ if(!e.target.closest('.region-wrap')) hideSuggestions(); });
+  $('region-search').addEventListener('keydown',e=>{ if(e.key==='Escape') hideSuggestions(); if(e.key==='Enter') { const first=$('place-suggestions').querySelector('button'); if(first) { e.preventDefault(); first.click(); } } });
+
+
+  // ---- More boundary sources: OpenStreetMap search and uploaded GeoJSON / KML files. Both feed selectPlace() like an iNaturalist place.
+  function addOsmFooter() {
+    const q=$('region-search').value.trim(), box=$('place-suggestions'); if(q.length<2) return;
+    const b=document.createElement('button'); b.type='button'; b.className='suggestion'; b.style.borderTop='1px solid rgba(128,128,128,.3)';
+    b.innerHTML='<div style="font-weight:650"><i class="fa-solid fa-earth-americas"></i> Search OpenStreetMap for “'+esc(q)+'”</div><div class="muted" style="font-size:10px;margin-top:3px">Parks, reserves, trails, neighborhoods · outlines © OpenStreetMap contributors</div>';
+    b.addEventListener('click',()=>searchOSM(q)); box.appendChild(b); box.classList.remove('hidden');
+  }
+  let osmLast=0;
+  async function searchOSM(q) {
+    const box=$('place-suggestions'); box.innerHTML='<div class="suggestion muted">Searching OpenStreetMap…</div>'; box.classList.remove('hidden');
+    try {
+      const wait=Math.max(0,1100-(Date.now()-osmLast)); if(wait) await new Promise(r=>setTimeout(r,wait)); osmLast=Date.now(); // Nominatim policy: at most 1 request per second
+      const u=new URL('https://nominatim.openstreetmap.org/search'); u.search=new URLSearchParams({q,format:'jsonv2',polygon_geojson:'1',polygon_threshold:'0.0005',limit:'8'});
+      const ctl=new AbortController(), t=setTimeout(()=>ctl.abort(),15000);
+      let res; try { res=await fetch(u,{signal:ctl.signal,headers:{Accept:'application/json'}}); } finally { clearTimeout(t); }
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      renderOsmResults(await res.json());
+    } catch(err) { const m=err.name==='AbortError'?'the request timed out':err.message; box.innerHTML='<div class="suggestion muted">OpenStreetMap search failed ('+esc(m)+'). Try again, upload a boundary file, or draw one on the map.</div>'; notice('OpenStreetMap search failed: '+m,true); }
+  }
+  function renderOsmResults(items) {
+    const box=$('place-suggestions'); box.replaceChildren(); let n=0;
+    (Array.isArray(items)?items:[]).forEach(it=>{
+      const bb=(it.boundingbox||[]).map(Number), bounds={swlat:bb[0],nelat:bb[1],swlng:bb[2],nelng:bb[3]};
+      if(!Object.values(bounds).every(Number.isFinite) || bounds.swlat>=bounds.nelat || bounds.swlng>=bounds.nelng) return;
+      const g=it.geojson, poly=!!g && (g.type==='Polygon'||g.type==='MultiPolygon'), name=it.display_name||it.name||'OpenStreetMap place';
+      const place={id:null,name,shortName:it.name||name.split(',')[0],bounds,raw:poly?{geojson:g}:null,source:'OpenStreetMap'};
+      const btn=document.createElement('button'); btn.type='button'; btn.className='suggestion'; btn.setAttribute('role','option');
+      const a=document.createElement('div'); a.textContent=name; a.style.fontWeight='650';
+      const c=document.createElement('div'); c.className='muted'; c.style.cssText='font-size:10px;margin-top:3px'; c.textContent='OpenStreetMap · '+(poly?'outline available':'bounding box only');
+      btn.append(a,c); btn.addEventListener('click',async()=>{ await selectPlace(place); setStatus($('footer-message').textContent,'Boundary © OpenStreetMap contributors'); }); box.appendChild(btn); n++;
+    });
+    if(!n) box.innerHTML='<div class="suggestion muted">OpenStreetMap found nothing. Try a different name, or upload a boundary file.</div>';
+    box.classList.remove('hidden');
+  }
+  function collectPolygons(g,out) {
+    if(!g) return;
+    if(g.type==='FeatureCollection') (g.features||[]).forEach(f=>collectPolygons(f,out));
+    else if(g.type==='Feature') collectPolygons(g.geometry,out);
+    else if(g.type==='GeometryCollection') (g.geometries||[]).forEach(x=>collectPolygons(x,out));
+    else if(g.type==='Polygon') out.push(g.coordinates);
+    else if(g.type==='MultiPolygon') (g.coordinates||[]).forEach(c=>out.push(c));
+  }
+  function kmlPolygons(text) {
+    const doc=new DOMParser().parseFromString(text,'application/xml'); if(doc.querySelector('parsererror')) throw new Error('this is not valid KML');
+    const ring=el=>{ const c=el.getElementsByTagName('coordinates')[0]; if(!c) return null; const pts=c.textContent.trim().split(/\s+/).map(t=>t.split(',').map(Number)).filter(p=>p.length>=2&&Number.isFinite(p[0])&&Number.isFinite(p[1])).map(p=>[p[0],p[1]]); return pts.length>=4?pts:null; };
+    return [...doc.getElementsByTagName('Polygon')].map(pg=>{ const ob=pg.getElementsByTagName('outerBoundaryIs')[0], o=ob&&ring(ob); if(!o) return null; return [o,...[...pg.getElementsByTagName('innerBoundaryIs')].map(ring).filter(Boolean)]; }).filter(Boolean);
+  }
+  function simplifyRing(r,tol) { // Douglas-Peucker; keeps huge outlines fast to clip and draw
+    if(r.length<=8) return r; const keep=new Uint8Array(r.length); keep[0]=keep[r.length-1]=1; const st=[[0,r.length-1]];
+    while(st.length) {
+      const [a,b]=st.pop(), [x1,y1]=r[a], [x2,y2]=r[b], dx=x2-x1, dy=y2-y1, L=dx*dx+dy*dy; let md=0,mi=-1;
+      for(let i=a+1;i<b;i++) { const [x,y]=r[i]; let d; if(!L) d=Math.hypot(x-x1,y-y1); else { const t=Math.max(0,Math.min(1,((x-x1)*dx+(y-y1)*dy)/L)); d=Math.hypot(x-x1-t*dx,y-y1-t*dy); } if(d>md) { md=d; mi=i; } }
+      if(md>tol && mi>0) { keep[mi]=1; st.push([a,mi],[mi,b]); }
+    }
+    const o=r.filter((_,i)=>keep[i]); return o.length>=4?o:r;
+  }
+  function placeFromPolygons(name,polys) {
+    if(!polys.length) throw new Error('no Polygon or MultiPolygon shapes were found (points and lines cannot be used as a boundary)');
+    const ext=geoExtent({type:'MultiPolygon',coordinates:polys}); if(!ext) throw new Error('no usable coordinates were found');
+    if(ext[0]<-90||ext[2]>90||ext[1]<-180||ext[3]>180||ext[0]>=ext[2]||ext[1]>=ext[3]) throw new Error('coordinates are outside longitude/latitude (WGS84) ranges; reproject the file to EPSG:4326 first');
+    let pts=0; polys.forEach(p=>p.forEach(r=>pts+=r.length)); let simplified=false;
+    if(pts>15000) { const tol=Math.max(ext[2]-ext[0],ext[3]-ext[1])/4000; polys=polys.map(p=>p.map(r=>simplifyRing(r,tol))); simplified=pts; }
+    return {id:null,name,shortName:name,bounds:{swlat:ext[0],swlng:ext[1],nelat:ext[2],nelng:ext[3]},raw:{geojson:{type:'MultiPolygon',coordinates:polys}},source:'file',simplified};
+  }
+  async function loadBoundaryFile(file) {
+    if(!file) return;
+    try {
+      if(/\.(zip|shp)$/i.test(file.name)) throw new Error('zipped shapefiles are not supported yet; convert to GeoJSON or KML first (for example with mapshaper.org)');
+      if(file.size>15*1024*1024) throw new Error('the file is over 15 MB; simplify it first (for example with mapshaper.org)');
+      const text=await file.text(), polys=[];
+      if(/\.kml$/i.test(file.name) || /^\s*(<\?xml|<kml)/i.test(text)) polys.push(...kmlPolygons(text));
+      else { let g; try { g=JSON.parse(text); } catch(e) { throw new Error('this is not valid GeoJSON'); } collectPolygons(g,polys); }
+      const name=file.name.replace(/\.[^.]+$/,'')||'Uploaded boundary', p=placeFromPolygons(name,polys);
+      $('region-search').value=name; await selectPlace(p); setStatus($('footer-message').textContent,'Boundary: uploaded file');
+      if(p.simplified) notice(`Large outline simplified for speed (${number(p.simplified)} points).`);
+    } catch(err) { notice('Boundary upload failed: '+err.message+'.',true); }
+    finally { $('boundary-file').value=''; }
+  }
+
+  // ---- Collapsible summary cards (remembered), so the map can take the space
+  function updateStatsSummary() { const t=id=>($(id).textContent||'—').trim(); const c=t('stat-cells'); $('stats-summary').textContent=(c==='—'||c==='0')?'Summary · run a scan to see results':`${c} cells · ${t('stat-zero')} zero-record · ${t('stat-observations')} observations`; }
+  function setStatsCollapsed(on,save=true) {
+    $('stats-grid').classList.toggle('hidden',on); $('stats-toggle').setAttribute('aria-expanded',String(!on)); $('stats-chevron').style.transform=on?'rotate(180deg)':''; updateStatsSummary();
+    if(save) { try { localStorage.setItem('inatgaps.statsCollapsed',on?'1':'0'); } catch(e) {} }
+    if(state.map) { setTimeout(()=>state.map.invalidateSize(),60); setTimeout(()=>state.map.invalidateSize(),300); }
+  }
+  new MutationObserver(updateStatsSummary).observe($('stats-grid'),{subtree:true,childList:true,characterData:true});
+  try { setStatsCollapsed(localStorage.getItem('inatgaps.statsCollapsed')==='1',false); } catch(e) { updateStatsSummary(); }
+  $('boundary-file').addEventListener('change',e=>loadBoundaryFile(e.target.files[0]));
+
+  async function selectPlace(place) {
+    hideSuggestions(); $('footer-right').textContent='iNatGaps · sampling-bias explorer';
+    let selected=place;
+    if((!selected.bounds || !usableGeoJSON(selected.raw)) && selected.id) {
+      $('region-help').textContent='Looking up the selected place boundary…';
+      // Try the v1 detail endpoint and then the legacy JSON endpoint. Some autocomplete
+      // responses omit bounds even when the place detail record contains them.
+      for(const url of [apiURL(`/places/${encodeURIComponent(selected.id)}`),`https://www.inaturalist.org/places/${encodeURIComponent(selected.id)}.json`]) {
+        try {
+          const data=await apiFetch(url);
+          const p=(data.results||[])[0] || data;
+          const b=placeBounds(p);
+          if(b) { selected={...selected,bounds:b,raw:p,name:p.display_name||p.name||selected.name}; break; }
+        } catch(e) { if(e.name==='AbortError') break; }
+      }
+    }
+    $('region-search').value=selected.name;
+    if(!selected.bounds) {
+      state.place=selected;
+      $('region-help').textContent='iNaturalist did not provide a usable bounding box for this result. Try a county or park result, or draw a boundary on the map.';
+      notice('This iNaturalist place has no usable bounding box. Try a nearby county or another matching result.',true); return;
+    }
+    cancelScan(true);
+    state.place=selected; state.bounds=selected.bounds; state.regionName=selected.name; state.didFit=false;
+    $('region-status').textContent=selected.name;
+    $('region-help').textContent=`Selected ${selected.name}. Choose a grid size and run a live scan.`;
+    state.placeGeometry = usableGeoJSON(selected.raw);
+    { const polys=state.placeGeometry?geoPolygons(state.placeGeometry):[]; state.placePolys=polys.length?polys:null; }
+    drawRegionBoundary();
+    previewGrid();
+    fitToBounds(state.bounds);
+    if(state.cells.length) $('region-help').textContent=state.placePolys?`Boundary available: grid cells are clipped to the place${state.cellsClipped?` (${number(state.cellsClipped)} bounding-box cells outside it were dropped)`:''}. Scan: ${estimateText()}.`:'Only a place bounding box was available, so the outline is approximate and grid cells may extend outside the true boundary (those cells will show zero records).';
+    setStatus(`Region selected: ${selected.name} · ready to scan`);
+  }
+
+  // Fit the map to a bounding box as tightly as the tiles allow. invalidateSize() first, because a stale container size is what makes fitBounds zoom out too far.
+  function fitToBounds(b) {
+    if(!state.map || !b) return;
+    const go=()=>{ try { state.map.invalidateSize(); state.map.fitBounds([[b.swlat,b.swlng],[b.nelat,b.nelng]],{padding:[18,18],maxZoom:16,animate:false}); } catch(e) {} };
+    go(); setTimeout(go,250); // second pass after the layout settles (panels, fonts, mobile address bar)
+  }
+  function previewGridCells() {
+    cancelScan(true);
+    const requested=Number($('grid-size').value)||25;
+    const grid=makeGrid(state.bounds,requested,MAX_CELLS,state.placePolys);
+    state.lastScan=null; state.cellsClipped=grid.clipped||0;
+    if(grid.tooMany) {
+      state.cells=[]; state.selectedId=null; setMode('idle'); refreshStale(); renderGrid();
+      notice(tooManyMsg(requested,grid),true);
+      $('region-help').textContent=`${state.regionName} remains selected. This size needs ${number(grid.totalCells)} cells; the limit is ${MAX_CELLS}. Choose a larger grid size or a smaller place.`;
+      return;
+    }
+    state.cells=grid.cells; state.cells.forEach(c=>{c.count=null;c.queried=false;c.source='pending';});
+    state.selectedId=centerCellId(state.cells,state.bounds);
+    setMode('idle'); refreshStale(); resetScanUI();
+    $('region-status').textContent=state.regionName;
+    const n=grid.cells.length, clip=grid.clipped?`, ${number(grid.clipped)} bounding-box cells outside the place dropped`:'';
+    $('region-help').textContent=`${state.regionName} is selected. Previewing ${requested} km cells (${n} cells${clip}). Click “Analyze live region” to load counts · ${estimateText()}.`;
+    renderGrid(); if(state.selectedId) selectCell(state.selectedId,false);
+    setStatus(`Grid ready: ${state.regionName} · ${requested} km cells`);
+    writeHash();
+  }
+  // Flatten GeoJSON into [{outer,holes,box}] (lng/lat rings) for point-in-polygon tests.
+  function geoPolygons(geo) {
+    const out=[];
+    const ringBox=r=>{ let a=Infinity,b=Infinity,c=-Infinity,d=-Infinity; for(const p of r){ if(p[0]<a)a=p[0]; if(p[0]>c)c=p[0]; if(p[1]<b)b=p[1]; if(p[1]>d)d=p[1]; } return [a,b,c,d]; };
+    const add=rings=>{ if(!Array.isArray(rings)||!rings.length||!Array.isArray(rings[0])) return; out.push({outer:rings[0],holes:rings.slice(1),box:ringBox(rings[0])}); };
+    const walk=o=>{ if(!o) return; if(o.type==='FeatureCollection') (o.features||[]).forEach(walk); else if(o.type==='Feature') walk(o.geometry); else if(o.type==='GeometryCollection') (o.geometries||[]).forEach(walk); else if(o.type==='Polygon') add(o.coordinates); else if(o.type==='MultiPolygon') (o.coordinates||[]).forEach(add); };
+    walk(geo); return out;
+  }
+  // Strip index: edges bucketed by latitude so a point test only looks at edges that can cross its ray.
+  function ringStrips(ring) {
+    if(ring.__strips) return ring.__strips;
+    let y0=Infinity,y1=-Infinity; for(const p of ring){ if(p[1]<y0)y0=p[1]; if(p[1]>y1)y1=p[1]; }
+    const B=Math.min(256,Math.max(1,Math.ceil(ring.length/8))), h=(y1-y0)||1e-9, strips=Array.from({length:B},()=>[]);
+    const at=y=>Math.max(0,Math.min(B-1,Math.floor((y-y0)/h*B)));
+    for(let i=0,j=ring.length-1;i<ring.length;j=i++) { const lo=at(Math.min(ring[i][1],ring[j][1])), hi=at(Math.max(ring[i][1],ring[j][1])); for(let k=lo;k<=hi;k++) strips[k].push(i); }
+    return ring.__strips={y0,h,B,strips};
+  }
+  function inRing(x,y,ring) {
+    const S=ringStrips(ring); if(y<S.y0 || y>S.y0+S.h) return false;
+    const k=Math.max(0,Math.min(S.B-1,Math.floor((y-S.y0)/S.h*S.B))); let inside=false;
+    for(const i of S.strips[k]) { const j=i===0?ring.length-1:i-1; const xi=ring[i][0],yi=ring[i][1],xj=ring[j][0],yj=ring[j][1]; if((yi>y)!==(yj>y) && x<(xj-xi)*(y-yi)/(yj-yi)+xi) inside=!inside; }
+    return inside;
+  }
+  function inPolys(x,y,polys) { for(const p of polys){ const b=p.box; if(x<b[0]||x>b[2]||y<b[1]||y>b[3]) continue; if(inRing(x,y,p.outer) && !p.holes.some(h=>inRing(x,y,h))) return true; } return false; }
+  const vGX=(I,x)=>Math.max(0,Math.min(I.G-1,Math.floor((x-I.x0)/I.w*I.G)));
+  const vGY=(I,y)=>Math.max(0,Math.min(I.G-1,Math.floor((y-I.y0)/I.h*I.G)));
+  function polyVertexInCell(p,b) {
+    let I=p.vidx;
+    if(!I) {
+      const G=Math.min(64,Math.max(1,Math.ceil(Math.sqrt(p.outer.length/4))));
+      I=p.vidx={G,x0:p.box[0],y0:p.box[1],w:(p.box[2]-p.box[0])||1e-9,h:(p.box[3]-p.box[1])||1e-9,buckets:new Map()};
+      for(const v of p.outer) { const k=vGY(I,v[1])*G+vGX(I,v[0]); let a=I.buckets.get(k); if(!a) { a=[]; I.buckets.set(k,a); } a.push(v); }
+    }
+    const gx0=vGX(I,b.swlng),gx1=vGX(I,b.nelng),gy0=vGY(I,b.swlat),gy1=vGY(I,b.nelat);
+    for(let gy=gy0;gy<=gy1;gy++) for(let gx=gx0;gx<=gx1;gx++) { const a=I.buckets.get(gy*I.G+gx); if(a) for(const v of a) if(v[0]>=b.swlng&&v[0]<=b.nelng&&v[1]>=b.swlat&&v[1]<=b.nelat) return true; }
+    return false;
+  }
+  // A cell is kept if any of 9 sample points falls inside the place, or a polygon vertex falls inside the cell (thin shapes).
+  function cellIntersectsPolys(b,polys) {
+    const xs=[(b.swlng+b.nelng)/2,b.swlng,b.nelng], ys=[(b.swlat+b.nelat)/2,b.swlat,b.nelat]; // centre first: most kept cells exit on the first test
+    for(const y of ys) for(const x of xs) if(inPolys(x,y,polys)) return true;
+    for(const p of polys) { if(p.box[0]>b.nelng||p.box[2]<b.swlng||p.box[1]>b.nelat||p.box[3]<b.swlat) continue; if(polyVertexInCell(p,b)) return true; }
+    return false;
+  }
+  function fastOn() { const el=$('fast-mode'); return !!(el && el.checked); }
+  function analyzeRegion(opts) { return fastOn()?analyzeRegionTiles(opts):analyzeRegionCells(opts); }
+  function previewGrid() { return fastOn()?previewGridTiles():previewGridCells(); }
+  function estimateText(f) { return fastOn()?estimateTextTiles(f):estimateTextCells(f); }
+  const KM_OPTS=$('grid-size').innerHTML, ZOOM_OPTS=Array.from({length:10},(_,i)=>`<option value="${i+5}"${i+5===9?' selected':''}>z${i+5}</option>`).join(''), sizeMemory={km:'25',tile:'9'};
+  function setFast(on,preview=true) {
+    const sel=$('grid-size'); sizeMemory[on?'km':'tile']=sel.value; $('fast-mode').checked=on;
+    sel.innerHTML=on?ZOOM_OPTS:KM_OPTS; sel.value=sizeMemory[on?'tile':'km']; if(on) updateZoomLabels();
+    $('grid-label').textContent=on?'Tile zoom → cell size':'Grid cell'; sel.setAttribute('aria-label',on?'Grid tile zoom':'Grid cell size');
+    $('proto-panel').classList.toggle('hidden',!on); if(on) $('proto-panel').open=true; $('smart-wrap').classList.toggle('hidden',on);
+    if(preview && state.bounds) previewGrid(); else refreshStale();
+  }
+  const MAX_TILES = 40;          // tile requests per scan (about 45 s at the paced rate)
+  const MAX_TILE_CELLS = 8000;   // cells drawn per scan; each tile holds up to 32 x 32 = 1024
+  const RANK_LIMIT = 250;        // ranked-list rows rendered
+  const UTF_HOSTS = {api:'https://api.inaturalist.org/v1', tiles:'https://tiles.inaturalist.org/v1'};
+  const tileLng = (x,z) => x/2**z*360-180;
+  const tileLat = (y,z) => { const n=Math.PI-2*Math.PI*y/2**z; return 180/Math.PI*Math.atan(0.5*(Math.exp(n)-Math.exp(-n))); };
+  const lngTile = (lng,z) => Math.floor((lng+180)/360*2**z);
+  const latTile = (lat,z) => { const r=Math.max(-85.0511,Math.min(85.0511,lat))*Math.PI/180; return Math.floor((1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*2**z); };
+  const tileBounds = t => ({swlat:tileLat(t.y+1,t.z),nelat:tileLat(t.y,t.z),swlng:tileLng(t.x,t.z),nelng:tileLng(t.x+1,t.z)});
+  const tileZoom = () => Number($('grid-size').value)||9;
+  const protoLog = m => { const el=$('proto-log'); if(!el) return; const pn=$('proto-panel'); if(pn) pn.open=true; el.textContent+=`${new Date().toLocaleTimeString()}  ${m}\n`; el.scrollTop=el.scrollHeight; };
+  function updateZoomLabels() {
+    const lat=state.bounds?(state.bounds.swlat+state.bounds.nelat)/2:35;
+    for(const o of $('grid-size').options) { const z=Number(o.value), km=40075.017*Math.cos(lat*Math.PI/180)/2**z/32; o.textContent=`z${z} · ~${km<1?Math.round(km*1000)+' m':km.toFixed(km<10?1:0)+' km'} cells`; }
+  }
+  // Every tile at zoom z is a 32 x 32 grid of cells. Cells keep their real (Mercator) shape, so they are not equal-area.
+  function makeTileGrid(bounds,z,polys) {
+    const n=2**z, clampT=v=>Math.max(0,Math.min(n-1,v));
+    const x0=clampT(lngTile(bounds.swlng,z)), x1=clampT(lngTile(bounds.nelng,z)), y0=clampT(latTile(bounds.nelat,z)), y1=clampT(latTile(bounds.swlat,z));
+    const totalTiles=(x1-x0+1)*(y1-y0+1);
+    if(totalTiles>MAX_TILES) return {cells:[],tiles:[],tooMany:true,reason:'tiles',totalTiles,totalCells:totalTiles*1024};
+    const cells=[], tiles=[]; let raw=0;
+    for(let ty=y0;ty<=y1;ty++) for(let tx=x0;tx<=x1;tx++) {
+      const tile={z,x:tx,y:ty,index:tiles.length+1,cells:[]};
+      const lng0=tileLng(tx,z), dLng=(tileLng(tx+1,z)-lng0)/32;
+      for(let cy=0;cy<32;cy++) {
+        const nelat=tileLat(ty+cy/32,z), swlat=tileLat(ty+(cy+1)/32,z);
+        if(swlat>bounds.nelat || nelat<bounds.swlat) continue;
+        const midLat=(swlat+nelat)/2, hKm=(nelat-swlat)*KM_PER_DEG;
+        for(let cx=0;cx<32;cx++) {
+          const swlng=lng0+dLng*cx, nelng=swlng+dLng;
+          if(swlng>bounds.nelng || nelng<bounds.swlng) continue;
+          raw++;
+          const b={swlat,swlng,nelat,nelng};
+          if(polys && !cellIntersectsPolys(b,polys)) continue;
+          const cell={id:`${z}/${tx}/${ty}:${cx}-${cy}`,row:cy,col:cx,label:`T${tile.index} r${cy+1}c${cx+1}`,bounds:b,center:{lat:midLat,lng:(swlng+nelng)/2},areaKm2:Math.max(.0001,hKm*dLng*KM_PER_DEG*Math.cos(midLat*Math.PI/180)),count:null,species:null,observers:null,priority:null,queried:false,source:'pending',tile,slot:cy*32+cx};
+          tile.cells.push(cell); cells.push(cell);
+          if(cells.length>MAX_TILE_CELLS) return {cells:[],tiles:[],tooMany:true,reason:'cells',totalTiles,totalCells:cells.length};
+        }
+      }
+      if(tile.cells.length) tiles.push(tile);
+    }
+    if(polys && !cells.length) return makeTileGrid(bounds,z,null); // unusable geometry: fall back to the bounding box
+    return {cells,tiles,tooMany:false,totalTiles:tiles.length,totalCells:cells.length,clipped:raw-cells.length};
+  }
+  const tileTooMany = (z,g) => g.reason==='tiles'?`Zoom ${z} would need ${number(g.totalTiles)} tiles (limit ${MAX_TILES}). Choose a lower zoom (bigger cells) or a smaller area.`:`Zoom ${z} would create more than ${number(MAX_TILE_CELLS)} cells. Choose a lower zoom (bigger cells) or a smaller area.`;
+  function tileURL(t,filters) {
+    const u=new URL(`${UTF_HOSTS[$('proto-host').value]}/${$('proto-endpoint').value}/${t.z}/${t.x}/${t.y}.grid.json`);
+    u.searchParams.set('verifiable','true'); if(filters.taxon) u.searchParams.set('taxon_id',filters.taxon); if(filters.d1) u.searchParams.set('d1',filters.d1); if(filters.d2) u.searchParams.set('d2',filters.d2);
+    return u.toString();
+  }
+  // UTFGrid -> 32 x 32 counts. iNaturalist's grid style is 32 x 32, its UTFGrid is 64 x 64, and the community-documented rule is to read the
+  // bottom-right character of each 2 x 2 block. The count is the cellCount field of that cell's data record.
+  function decodeUTFGrid(json) {
+    if(!json || !Array.isArray(json.grid) || !Array.isArray(json.keys) || !json.data) throw new Error('Unexpected response: expected a UTFGrid with grid, keys and data');
+    const rows=json.grid.length, cols=String(json.grid[0]||'').length;
+    if(rows<32 || cols<32 || rows%32 || cols%32) throw new Error(`Unexpected UTFGrid size ${cols} x ${rows} (expected a multiple of 32)`);
+    const sy=rows/32, sx=cols/32, counts=new Array(1024).fill(0), fields=new Set(); let sawData=false, sawCount=false, cellsWithData=0, total=0;
+    for(let cy=0;cy<32;cy++) {
+      const row=String(json.grid[cy*sy+(sy-1)]);
+      for(let cx=0;cx<32;cx++) {
+        let i=row.charCodeAt(cx*sx+(sx-1)); if(i>=93) i--; if(i>=35) i--; i-=32;
+        const key=json.keys[i]; if(!key) continue; const d=json.data[key]; if(!d) continue;
+        sawData=true; Object.keys(d).forEach(k=>fields.add(k));
+        const n=Number(d.cellCount); if(Number.isFinite(n)) { sawCount=true; if(n>0) { counts[cy*32+cx]=n; cellsWithData++; total+=n; } }
+      }
+    }
+    if(sawData && !sawCount) throw new Error('UTFGrid records had no numeric cellCount field (fields seen: '+[...fields].join(', ')+')');
+    return {counts,cellsWithData,total,fields:[...fields]};
+  }
+  // First tile of a scan: also finds a host that works from this page (CORS or availability differ), then remembers it.
+  async function probeTiles(tile,filters,signal) {
+    const first=$('proto-host').value, order=[first,...Object.keys(UTF_HOSTS).filter(h=>h!==first)]; let lastErr;
+    for(const h of order) {
+      $('proto-host').value=h;
+      try {
+        await takeSlot(signal); const url=tileURL(tile,filters), json=await apiFetch(url,signal), dec=decodeUTFGrid(json);
+        cacheWrite(tileCache,tileKey(tile,filters),dec,300); schedulePersistTiles();
+        protoLog(`OK ${url}\n    ${json.grid.length}x${String(json.grid[0]).length} grid, ${json.keys.length} keys, record fields: ${dec.fields.join(', ')||'(none)'}; ${dec.cellsWithData} non-empty cells, sum ${dec.total}`);
+        return dec;
+      } catch(err) {
+        if(signal.aborted || err.name==='AbortError') throw err;
+        lastErr=err; protoLog(`Host ${h} failed: ${err.message}`);
+        if(/429/.test(err.message)) throw err;
+      }
+    }
+    throw lastErr;
+  }
+  async function loadTile(tile,filters,signal) {
+    const dec=decodeUTFGrid(await fetchPaced(tileURL(tile,filters),signal));
+    cacheWrite(tileCache,tileKey(tile,filters),dec,300); schedulePersistTiles(); return dec;
+  }
+  async function protoTileCheck() {
+    if(!(state.tiles||[]).length) { protoLog('Select a region first.'); notice('Select a region first.',true); return; }
+    const filters=readFilters(), sel=selectedCell(), tile=(sel&&sel.tile)||state.tiles[0], ac=new AbortController();
+    protoLog(`Tile check: z${tile.z}/${tile.x}/${tile.y}`);
+    try {
+      let hit=cacheEntry(tileCache,tileKey(tile,filters),CACHE_TTL); const dec=hit?hit.value:await probeTiles(tile,filters,ac.signal);
+      const tb=tileBounds(tile), params={...tb,per_page:1,only_id:true,verifiable:true}; if(filters.taxon) params.taxon_id=filters.taxon; if(filters.d1) params.d1=filters.d1; if(filters.d2) params.d2=filters.d2;
+      await takeSlot(ac.signal); const truth=Number((await apiFetch(apiURL('/observations',params),ac.signal)).total_results);
+      const diff=dec.total-truth; protoLog(`  tile decoded sum ${number(dec.total)} vs /observations ${number(truth)} → difference ${diff>=0?'+':''}${number(diff)}${truth?` (${(diff/truth*100).toFixed(1)}%)`:''}`);
+      protoLog(Math.abs(diff)<=Math.max(2,truth*.02)?'  ✔ totals agree (within 2%)':'  ✘ totals disagree: cell counts from this endpoint are not reliable for these filters');
+    } catch(err) { if(err.name==='AbortError') return; protoLog(`  check failed: ${err.message}${err.name==='TypeError'||/Failed to fetch|network/i.test(err.message)?' (network or CORS problem: try the other Host option)':''}`); notice(`Tile check failed: ${err.message}`,true); }
+  }
+  async function protoCellCheck() {
+    const c=selectedCell(); if(!c || !Number.isFinite(c.count)) { protoLog('Select a cell that has a tile count first (run Analyze in fast mode, then click a cell).'); notice('Select a cell that has a tile count first (run Analyze in fast mode, then click a cell).',true); return; }
+    const filters=readFilters(), ac=new AbortController(), params=queryParamsForCell(c,{per_page:1,only_id:true},filters);
+    protoLog(`Checking cell ${c.label}…`);
+    try {
+      await takeSlot(ac.signal); const truth=Number((await apiFetch(apiURL('/observations',params),ac.signal)).total_results);
+      protoLog(`Cell ${c.label}: tile count ${number(c.count)} vs /observations for the same box ${number(truth)} → difference ${c.count-truth>=0?'+':''}${number(c.count-truth)}`);
+    } catch(err) { if(err.name==='AbortError') return; protoLog(`  cell check failed: ${err.message}`); notice(`Cell check failed: ${err.message}`,true); }
+  }
+  function cellTooltip(cell) { return `<strong>${esc(cell.label)}</strong><br>${Number.isFinite(cell.count)?number(cell.count)+' observations · '+(cell.count/Math.max(.0001,cell.areaKm2)).toFixed(2)+' obs/km²':cell.source==='error'?'Count failed — retry scan':'Not queried'}<br>Survey priority: ${cell.priority===null?'—':cell.priority+'/100'}`; }
+  function centerCellId(cells,bounds) {
+    if(!cells.length) return null;
+    const cy=(bounds.swlat+bounds.nelat)/2, cx=(bounds.swlng+bounds.nelng)/2, k=Math.max(.12,Math.cos(cy*Math.PI/180));
+    let best=cells[0], bd=Infinity;
+    for(const c of cells) { const d=(c.center.lat-cy)**2+((c.center.lng-cx)*k)**2; if(d<bd) { bd=d; best=c; } }
+    return best.id;
+  }
+  function makeGrid(bounds,requestedKm,keepUnder=MAX_CELLS,polys=null) {
+    const midLat=(bounds.swlat+bounds.nelat)/2;
+    const latKm=Math.max(0.01,(bounds.nelat-bounds.swlat)*111.32);
+    const lngKm=Math.max(0.01,(bounds.nelng-bounds.swlng)*111.32*Math.max(0.12,Math.cos(midLat*Math.PI/180)));
+    // Honor the user's requested cell size. Never silently enlarge fine grids;
+    // refuse oversized grids with a clear message before allocating thousands of layers/requests.
+    const cellKm=requestedKm; const rows=Math.ceil(latKm/cellKm),cols=Math.ceil(lngKm/cellKm);
+    if(rows*cols>(polys?RAW_CELL_CAP:keepUnder)) return {cells:[],rows,cols,effectiveKm:cellKm,tooMany:true,totalCells:rows*cols};
+    const latStep=(bounds.nelat-bounds.swlat)/rows; const lngStep=(bounds.nelng-bounds.swlng)/cols;
+    const all=[];
+    for(let r=0;r<rows;r++) for(let c=0;c<cols;c++) {
+      const swlat=bounds.swlat+r*latStep, nelat=r===rows-1?bounds.nelat:bounds.swlat+(r+1)*latStep;
+      const swlng=bounds.swlng+c*lngStep, nelng=c===cols-1?bounds.nelng:bounds.swlng+(c+1)*lngStep;
+      const center={lat:(swlat+nelat)/2,lng:(swlng+nelng)/2}; const areaKm2=(nelat-swlat)*111.32*(nelng-swlng)*111.32*Math.max(0.05,Math.cos(center.lat*Math.PI/180));
+      all.push({id:`${r}-${c}`,row:r,col:c,label:`${String.fromCharCode(65+(r%26))}${Math.floor(r/26)||''}-${String(c+1).padStart(2,'0')}`,bounds:{swlat,swlng,nelat,nelng},center,areaKm2,count:null,species:null,observers:null,priority:null,queried:false,source:'pending'});
+    }
+    // Clip to the real place boundary when we have one; if clipping removes everything, fall back to the full box.
+    const clippedCells=polys?all.filter(c=>cellIntersectsPolys(c.bounds,polys)):all;
+    const cells=clippedCells.length?clippedCells:all;
+    if(cells.length>keepUnder) return {cells:[],rows,cols,effectiveKm:cellKm,tooMany:true,totalCells:cells.length};
+    return {cells,rows,cols,effectiveKm:cellKm,tooMany:false,totalCells:cells.length,clipped:all.length-cells.length};
+  }
+  function scoreCells() {
+    const counts=state.cells.filter(c=>Number.isFinite(c.count)).map(c=>c.count);
+    const max=Math.max(1,...counts);
+    state.cells.forEach(c=>{
+      if(!Number.isFinite(c.count)) { c.priority=null; return; }
+      const gap=100*(1-Math.log1p(c.count)/Math.log1p(max));
+      const zeroBoost=c.count===0?10:0;
+      // Count-only priority, kept transparent until habitat/effort covariates are available.
+      c.priority=Math.max(0,Math.min(100,Math.round(gap*.9+zeroBoost)));
+    });
+  }
+  function cellColor(cell,maxCount) {
+    if(!Number.isFinite(cell.count)) return '#9aa59a';
+    if(cell.count===0) return COLORS.gap;
+    const max=Number.isFinite(maxCount)?Math.max(1,maxCount):Math.max(1,...state.cells.filter(c=>Number.isFinite(c.count)).map(c=>c.count));
+    const log=Math.log1p(cell.count)/Math.log1p(max);
+    if(log<.22) return COLORS.low; if(log<.48) return COLORS.moderate; if(log<.72) return COLORS.high; return COLORS.hotspot;
+  }
+  function boundaryLatLng(e) { return state.map.mouseEventToLatLng(e).wrap(); }
+  function clearDrawPreview() { if(state.drawPreviewLayer) { state.map.removeLayer(state.drawPreviewLayer); state.drawPreviewLayer=null; } state.drawStartLatLng=null; state.drawPointerId=null; }
+  function stopBoundaryDrawing() {
+    if(!state.map) return;
+    state.manualDrawing=false; clearDrawPreview();
+    const el=state.map.getContainer();
+    el.removeEventListener('pointerdown',onBoundaryPointerDown);
+    el.removeEventListener('pointermove',onBoundaryPointerMove);
+    el.removeEventListener('pointerup',onBoundaryPointerUp);
+    el.removeEventListener('pointercancel',onBoundaryPointerCancel);
+    state.map.dragging.enable();
+    $('map').classList.remove('drawing-boundary');
+    const btn=$('draw-boundary-btn');
+    btn.classList.remove('draw-active'); btn.innerHTML='<i class="fa-regular fa-square"></i> Draw boundary';
+    btn.title='Draw a custom rectangular analysis area on the map';
+  }
+  function onBoundaryPointerDown(e) {
+    if(!state.manualDrawing || state.drawStartLatLng) return;
+    if(e.pointerType==='mouse' && e.button!==0) return;
+    if(e.target.closest && e.target.closest('.leaflet-control')) return;
+    e.preventDefault(); e.stopPropagation();
+    try { state.map.getContainer().setPointerCapture(e.pointerId); } catch(_) {}
+    state.drawPointerId=e.pointerId; state.drawStartLatLng=boundaryLatLng(e);
+    state.drawPreviewLayer=L.rectangle([state.drawStartLatLng,state.drawStartLatLng],{color:'#26653e',weight:2,dashArray:'5 4',fillColor:'#8eaf84',fillOpacity:.12,interactive:false}).addTo(state.map);
+  }
+  function onBoundaryPointerMove(e) {
+    if(!state.manualDrawing || !state.drawStartLatLng || e.pointerId!==state.drawPointerId || !state.drawPreviewLayer) return;
+    state.drawPreviewLayer.setBounds(L.latLngBounds(state.drawStartLatLng,boundaryLatLng(e)));
+  }
+  function onBoundaryPointerCancel(e) { if(state.drawStartLatLng && e.pointerId===state.drawPointerId) clearDrawPreview(); }
+  function onBoundaryPointerUp(e) {
+    if(!state.manualDrawing || !state.drawStartLatLng || e.pointerId!==state.drawPointerId) return;
+    const b=L.latLngBounds(state.drawStartLatLng,boundaryLatLng(e));
+    const sw=b.getSouthWest(), ne=b.getNorthEast();
+    const bounds={swlat:sw.lat,swlng:sw.lng,nelat:ne.lat,nelng:ne.lng};
+    const {h:heightKm,w:widthKm}=dimsKm(bounds);
+    if(heightKm<.1 || widthKm<.1) { notice('Draw a larger rectangle (at least about 100 metres in each direction).',true); clearDrawPreview(); return; }
+    stopBoundaryDrawing();
+    cancelScan(true); hideSuggestions();
+    state.place={id:null,name:'Custom drawn area',shortName:'Custom drawn area',bounds,raw:null};
+    state.placeGeometry=null; state.placePolys=null; state.lastScan=null; state.bounds=bounds; state.regionName='Custom drawn area'; state.didFit=true;
+    $('region-search').value='Custom drawn area'; $('region-status').textContent='Custom drawn area'; $('map-status').textContent='Custom analysis boundary';
+    $('region-help').textContent=`Custom boundary selected (${heightKm.toFixed(1)} × ${widthKm.toFixed(1)} km). Choose a grid size, then analyze live observations.`;
+    previewGrid();
+    state.boundaryKey=null; drawRegionBoundary(); writeHash();
+    fitToBounds(bounds);
+    resetScanUI();
+  }
+  function toggleBoundaryDrawing() {
+    if(!state.map || state.fallbackMap) { notice('Map drawing is unavailable because the map could not load.',true); return; }
+    if(state.manualDrawing) { stopBoundaryDrawing(); notice('Boundary drawing cancelled. Your previous selection is unchanged.'); return; }
+    state.manualDrawing=true; state.drawStartLatLng=null;
+    state.map.dragging.disable();
+    $('map').classList.add('drawing-boundary');
+    const btn=$('draw-boundary-btn'); btn.classList.add('draw-active'); btn.innerHTML='<i class="fa-solid fa-xmark"></i> Cancel drawing'; btn.title='Cancel boundary drawing';
+    $('map-status').textContent='Draw boundary · press and drag on the map';
+    $('region-help').textContent='Press and drag across the map (mouse or touch) to draw a rectangular custom analysis boundary. Release to use it; click Cancel drawing to keep the current place.';
+    const el=state.map.getContainer();
+    el.addEventListener('pointerdown',onBoundaryPointerDown);
+    el.addEventListener('pointermove',onBoundaryPointerMove);
+    el.addEventListener('pointerup',onBoundaryPointerUp);
+    el.addEventListener('pointercancel',onBoundaryPointerCancel);
+  }
+
+  function initMap() {
+    if(!window.L) { state.fallbackMap=true; $('map').style.display='none'; $('fallback-grid').style.display='grid'; $('map-status').textContent='Map library unavailable · grid-only mode'; return; }
+    try {
+      state.map=L.map('map',{zoomControl:false,scrollWheelZoom:true,preferCanvas:true,attributionControl:true}).setView([34.05,-118.5],8);
+      // Keep the zoom buttons in the top-right so the status badge never covers them.
+      L.control.zoom({position:'topright'}).addTo(state.map);
+      // Use Esri's public tile services by default. This avoids the tile endpoint that was returning 403.
+      const esriAttribution='Tiles &copy; Esri, HERE, Garmin, USGS, EPA, NPS';
+      state.tileLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:esriAttribution, crossOrigin:true});
+      state.topoLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Tiles &copy; Esri, USGS, NOAA', crossOrigin:true});
+      state.satLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Imagery &copy; Esri, Maxar, Earthstar Geographics, USGS, AeroGRID, IGN, GIS User Community', crossOrigin:true});
+      state.map.createPane('labels'); state.map.getPane('labels').style.zIndex=450; state.map.getPane('labels').style.pointerEvents='none'; // drawn above the grid so names stay readable over imagery
+      state.labelsLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,pane:'labels',attribution:'Labels &copy; Esri'}); // no crossOrigin: display does not need CORS
+      { let ok=0,bad=0,warned=false; state.labelsLayer.on('tileload',()=>{ ok++; }); state.labelsLayer.on('tileerror',()=>{ bad++; if(bad>=3 && !ok && !warned) { warned=true; notice('Place labels are not loading (the label service may be blocked or offline). Untick Place labels in the layer menu.',true); } }); }
+      state.map.on('baselayerchange',e=>{ if(e.layer===state.satLayer) state.labelsLayer.addTo(state.map); }); // hybrid look by default on satellite; the Labels checkbox can turn it off
+      // Optional public-lands overlay (off by default). Candidate services are probed the first time it is switched on; the first that answers is used. All are US-only and none could be verified when this was written.
+      const LANDS_SOURCES=[
+        {mode:'tile',label:'BLM surface management agency',url:'https://gis.blm.gov/arcgis/rest/services/lands/BLM_Natl_SMA_Cached_with_PriUnk/MapServer',credit:'Land ownership: BLM Surface Management Agency'},
+        {mode:'export',label:'USGS PAD-US',url:'https://gis1.usgs.gov/arcgis/rest/services/padus3/Manager_Type/MapServer',credit:'Protected areas: USGS PAD-US'},
+        {mode:'export',label:'Esri USA Protected Areas',url:'https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/USA_Protected_Areas/MapServer',credit:'Protected areas: Esri, USGS PAD-US'}
+      ];
+      const BLANK='data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+      const landsURL=(src,c)=>{ if(src.mode==='tile') return `${src.url}/tile/${c.z}/${c.y}/${c.x}`; const R=156543.03392804097/2**c.z, x0=-20037508.342789244+c.x*256*R, y1=20037508.342789244-c.y*256*R; return `${src.url}/export?bbox=${x0},${y1-256*R},${x0+256*R},${y1}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&f=image`; };
+      const LandsLayer=L.TileLayer.extend({ getTileUrl(c) { return this.options.src?landsURL(this.options.src,c):BLANK; } }); // no crossOrigin: plain image display needs no CORS headers
+      state.landsLayer=new LandsLayer('',{maxZoom:19,opacity:.55,src:null});
+      const probeImg=url=>new Promise(res=>{ const i=new Image(), t=setTimeout(()=>{ i.src=''; res(false); },8000); i.onload=()=>{ clearTimeout(t); res(true); }; i.onerror=()=>{ clearTimeout(t); res(false); }; i.src=url; });
+      let landsProbing=false;
+      const tileAt=(ll,z)=>{ const n=2**z, r=ll.lat*Math.PI/180; return {z,x:Math.floor((ll.lng+180)/360*n),y:Math.floor((1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*n)}; };
+      state.landsLayer.on('add',async()=>{
+        if(state.landsLayer.options.src || landsProbing) return; landsProbing=true; notice('Looking for a public-lands map service…');
+        const ctr=state.map.getCenter(), z=Math.max(5,Math.min(11,Math.round(state.map.getZoom())));
+        let found=null; for(const src of LANDS_SOURCES) { if(await probeImg(landsURL(src,tileAt(ctr,z)))) { found=src; break; } }
+        let native=19;
+        if(found && found.mode==='tile') { // pre-rendered tiles stop at some zoom: find the deepest level that has tiles here (3x3 neighbours, since empty tiles may be missing) and magnify beyond it
+          native=z; for(let zz=17;zz>z;zz--) { const t=tileAt(ctr,zz); const urls=[]; for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++) urls.push(landsURL(found,{z:zz,x:t.x+dx,y:t.y+dy})); if((await Promise.all(urls.map(probeImg))).some(Boolean)) { native=zz; break; } }
+        }
+        landsProbing=false;
+        if(found) { state.landsLayer.options.src=found; state.landsLayer.options.maxNativeZoom=native; state.landsLayer.options.attribution=found.credit; state.map.attributionControl.addAttribution(found.credit); state.landsLayer.redraw(); notice('Public lands: showing '+found.label+(native<19?` (detail to zoom ${native}, magnified beyond)`:'')+'.'); }
+        else { notice('No public-lands service responded for this part of the map. The tried services cover the United States only and may be blocked or offline.',true); if(state.map.hasLayer(state.landsLayer)) state.map.removeLayer(state.landsLayer); }
+      });
+      { let ok=0,bad=0,warned=false; state.landsLayer.on('tileload',()=>{ ok++; }); state.landsLayer.on('tileerror',()=>{ if(!state.landsLayer.options.src) return; bad++; if(bad>=6 && !ok && !warned) { warned=true; notice('The public-lands layer is not drawing tiles here (its service may not cover this area). Untick it in the layer menu.',true); } }); }
+      state.tileLayer.addTo(state.map);
+      state.gridLayer=L.layerGroup().addTo(state.map);
+      L.control.layers({'Esri street map':state.tileLayer,'Esri topographic':state.topoLayer,'Esri satellite':state.satLayer},{'Sampling grid':state.gridLayer,'Place labels':state.labelsLayer,'Public lands (beta)':state.landsLayer},{collapsed:true,position:'topright'}).addTo(state.map);
+      let streetFallbackTried=false;
+      state.tileLayer.on('tileerror',()=>{
+        if(streetFallbackTried) return;
+        streetFallbackTried=true;
+        if(state.map.hasLayer(state.tileLayer)) {
+          state.map.removeLayer(state.tileLayer);
+          state.topoLayer.addTo(state.map);
+          $('map-status').textContent='Street tiles unavailable · switched to Esri topographic';
+        }
+      });
+      state.map.on('baselayerchange',()=>setTimeout(()=>state.map.invalidateSize(),50));
+    } catch(err) { state.fallbackMap=true; $('map').style.display='none'; $('fallback-grid').style.display='grid'; $('map-status').textContent='Map initialization failed · grid-only mode'; }
+  }
+  function usableGeoJSON(place) {
+    if(!place || typeof place!=='object') return null;
+    // bounding_box_geojson is deliberately excluded: it is only a rectangle and must not be reported as the true boundary.
+    let candidates=[place.geojson,place.geo_json,place.geometry_geojson,place.geometry];
+    for(const raw of candidates) {
+      let g=raw;
+      if(typeof g==='string') { try { g=JSON.parse(g); } catch(e) { continue; } }
+      if(g && (g.type==='Feature' || g.type==='FeatureCollection' || g.type==='Polygon' || g.type==='MultiPolygon')) return g;
+    }
+    return null;
+  }
+  function drawRegionBoundary() {
+    if(!state.map || !window.L) return;
+    const key=JSON.stringify({place:state.place?.id||state.regionName,bounds:state.bounds,geometry:state.placeGeometry||null});
+    if(state.boundaryLayer && state.boundaryKey===key) return;
+    if(state.boundaryLayer) state.map.removeLayer(state.boundaryLayer);
+    state.boundaryKey=key;
+    const geo=state.placeGeometry || usableGeoJSON(state.place?.raw);
+    if(geo) {
+      try { state.boundaryLayer=L.geoJSON(geo,{style:{color:'#183f28',weight:3,opacity:.95,fillColor:'#8eaf84',fillOpacity:.04,dashArray:'7 4'}}).addTo(state.map); return; } catch(e) {}
+    }
+    if(state.bounds) {
+      state.boundaryLayer=L.rectangle([[state.bounds.swlat,state.bounds.swlng],[state.bounds.nelat,state.bounds.nelng]],{color:'#183f28',weight:2,dashArray:'7 5',fill:false,opacity:.9}).addTo(state.map);
+      state.boundaryLayer.bindTooltip('Approximate place bounding box (not the exact boundary)');
+    }
+  }
+  const LEGEND_DEFAULT=['Zero records','Very low','Moderate','High','Most records'];
+  function updateLegend(max) {
+    const items=document.querySelectorAll('.legend .legend-item'); if(items.length<5) return;
+    const lg=Math.log1p(max), b=f=>Math.ceil(Math.expm1(f*lg)), t=[b(.22),b(.48),b(.72)];
+    const labels=(max>=20 && t[0]>1 && t[0]<t[1] && t[1]<t[2]) ? ['Zero records',`Very low (1–${t[0]-1})`,`Moderate (${t[0]}–${t[1]-1})`,`High (${t[1]}–${t[2]-1})`,`Most records (${t[2]}+)`] : LEGEND_DEFAULT;
+    items.forEach((el,i)=>{ if(el.lastChild) el.lastChild.textContent=labels[i]; });
+  }
+  function renderGrid() {
+    scoreCells(); state.cellById=new Map(state.cells.map(c=>[c.id,c]));
+    $('coverage-count').textContent=`${state.cells.length} cells${state.cells.some(c=>c.source==='pending')?' · loading':''}`;
+    const maxCount=Math.max(1,...state.cells.filter(c=>Number.isFinite(c.count)).map(c=>c.count));
+    updateLegend(maxCount);
+    if(state.map && state.gridLayer) {
+      const liveIds=new Set(state.cells.map(c=>c.id));
+      for(const [id,layer] of state.cellLayers) if(!liveIds.has(id)) { state.gridLayer.removeLayer(layer); state.cellLayers.delete(id); }
+      state.cells.forEach(cell=>{
+        const color=cellColor(cell,maxCount); const selected=cell.id===state.selectedId;
+        let rect=state.cellLayers.get(cell.id);
+        const boundsKey=[cell.bounds.swlat,cell.bounds.swlng,cell.bounds.nelat,cell.bounds.nelng].join(',');
+        if(rect && rect.__inatBoundsKey!==boundsKey) { state.gridLayer.removeLayer(rect); state.cellLayers.delete(cell.id); rect=null; }
+        if(!rect) {
+          rect=L.rectangle([[cell.bounds.swlat,cell.bounds.swlng],[cell.bounds.nelat,cell.bounds.nelng]]);
+          rect.__inatBoundsKey=boundsKey; rect.on('click',()=>selectCell(cell.id,true)); rect.on('mouseover',e=>{ const c=state.cellById&&state.cellById.get(cell.id); if(c) rect.bindTooltip(cellTooltip(c),{sticky:true}).openTooltip(e.latlng); }); rect.on('mouseout',()=>rect.unbindTooltip()); rect.addTo(state.gridLayer); state.cellLayers.set(cell.id,rect);
+        }
+        rect.setStyle({color:selected?'#183f28':'#ffffff',weight:selected?2:1,opacity:selected?1:.82,fillColor:color,fillOpacity:cell.count===0?.48:.34});
+      });
+      drawRegionBoundary();
+      if(state.cells.length) {
+        const b=state.bounds;
+        if(!state.didFit) { fitToBounds(b); state.didFit=true; }
+      }
+      $('fallback-grid').style.display='none'; $('map').style.display='block';
+    } else {
+      const wrap=$('fallback-grid'); wrap.replaceChildren(); wrap.style.display='grid';
+      state.cells.slice(0,64).forEach(cell=>{const b=document.createElement('button'); b.className='fallback-cell'+(cell.id===state.selectedId?' selected':''); b.style.background=cellColor(cell,maxCount); b.title=`${cell.label}: ${Number.isFinite(cell.count)?cell.count+' observations':cell.source==='error'?'Query failed — retry scan':cell.source==='loading'?'Querying…':'Waiting for count'}`; b.textContent=Number.isFinite(cell.count)?cell.count:cell.source==='error'?'!':'…'; b.addEventListener('click',()=>selectCell(cell.id,true)); wrap.appendChild(b);});
+    }
+    $('map-status').textContent=!state.cells.length?'SELECT A PLACE OR DRAW A BOUNDARY':state.scanInProgress?'LIVE QUERY · results update as received':state.stale?'FILTERS CHANGED · RE-RUN TO REFRESH':state.mode==='idle'?'GRID PREVIEW · NOT YET QUERIED':'LIVE iNATURALIST RESULTS';
+    updateStats(); renderRankList(); updateEstimate();
+  }
+  function updateStats() {
+    const queried=state.cells.filter(c=>Number.isFinite(c.count)); const zeros=queried.filter(c=>c.count===0).length; const total=queried.reduce((sum,c)=>sum+(c.count||0),0);
+    $('stat-cells').textContent=number(state.cells.length); $('stat-zero').textContent=queried.length?number(zeros):'—'; $('stat-observations').textContent=queried.length?number(total):'—';
+  }
+  function priorityBand(c) { if(!Number.isFinite(c.priority)) return 'Pending'; if(c.priority>=85) return 'Very high'; if(c.priority>=65) return 'High'; if(c.priority>=40) return 'Moderate'; return 'Lower'; }
+  function renderRankList() {
+    const list=$('rank-list'); const keepScroll=list.scrollTop; list.replaceChildren();
+    const ranked=[...state.cells].sort((a,b)=>{
+      if(a.priority===null && b.priority!==null) return 1; if(b.priority===null && a.priority!==null) return -1;
+      return (b.priority||0)-(a.priority||0) || (a.count||0)-(b.count||0) || a.label.localeCompare(b.label);
+    });
+    const done=state.cells.filter(c=>Number.isFinite(c.count)).length;
+    $('rank-summary').textContent=`${number(ranked.length)} grid squares${ranked.length>RANK_LIMIT?` (top ${RANK_LIMIT} shown)`:''} · ${number(done)} counted · priority is based on observation counts only.`;
+    if(!ranked.length) { list.innerHTML='<div class="empty">No grid cells yet. Search for a place or draw a boundary on the map.</div>'; return; }
+    const maxCount=Math.max(1,...state.cells.filter(c=>Number.isFinite(c.count)).map(c=>c.count));
+    ranked.slice(0,RANK_LIMIT).forEach((cell,i)=>{
+      const row=document.createElement('button'); row.type='button'; row.className='rank-row'+(cell.id===state.selectedId?' selected':'');
+      const rank=document.createElement('span'); rank.className='rank-num'; rank.textContent=String(i+1).padStart(2,'0');
+      const mid=document.createElement('span'); const title=document.createElement('div'); title.className='rank-name'; title.textContent=cell.label;
+      const sub=document.createElement('div'); sub.className='rank-sub'; sub.textContent=Number.isFinite(cell.count)?`${priorityBand(cell)} priority · ${cell.count===0?'no records':number(cell.count)+' observations'}`:'Waiting for count…';
+      const track=document.createElement('div'); track.className='bar-track'; const fill=document.createElement('div'); fill.className='bar-fill'; fill.style.width=`${cell.priority||0}%`; fill.style.background=cellColor(cell,maxCount); track.appendChild(fill); mid.append(title,sub,track);
+      const right=document.createElement('span'); right.className='rank-count'; right.textContent=cell.priority===null?'…':`${cell.priority}`; const tiny=document.createElement('div'); tiny.className='rank-sub'; tiny.textContent='/100'; right.appendChild(tiny);
+      row.append(rank,mid,right); row.addEventListener('click',()=>selectCell(cell.id,true)); list.appendChild(row);
+    });
+    list.scrollTop=keepScroll;
+  }
+  function renderSpecies(items,container) {
+    container.replaceChildren();
+    if(!items || !items.length) { const none=document.createElement('div'); none.className='small muted'; none.textContent='No species records in this cell.'; container.appendChild(none); return; }
+    items.slice(0,7).forEach(item=>{
+      const row=document.createElement('div'); row.className='species-item';
+      const left=document.createElement('div'); const link=document.createElement('a'); link.className='species-link'; link.href=item.url||'https://www.inaturalist.org'; link.target='_blank'; link.rel='noopener noreferrer'; link.textContent=item.name||item.taxon?.preferred_common_name||item.taxon?.name||'Unknown taxon';
+      left.appendChild(link); const sci=document.createElement('div'); sci.className='muted'; sci.style.fontSize='10px'; sci.style.fontStyle='italic'; sci.textContent=item.scientific||item.taxon?.name||''; left.appendChild(sci);
+      const count=document.createElement('span'); count.className='muted'; count.textContent=item.count!==undefined?number(item.count):''; row.append(left,count); container.appendChild(row);
+    });
+  }
+  function selectedCell() { return state.cells.find(c=>c.id===state.selectedId) || null; }
+  function selectCell(id,loadDetails=true) {
+    const cell=state.cells.find(c=>c.id===id); if(!cell) return;
+    state.selectedId=id;
+    if(state.map && state.gridLayer) {
+      state.map.closePopup();
+    }
+    $('detail-title').textContent=cell.label; $('detail-coords').textContent=`${cell.center.lat.toFixed(4)}, ${cell.center.lng.toFixed(4)} · approx. ${dimsKm(cell.bounds).h.toFixed(1)} × ${dimsKm(cell.bounds).w.toFixed(1)} km`;
+    $('detail-count').textContent=Number.isFinite(cell.count)?number(cell.count):'…';
+    $('priority-badge').textContent=`Priority ${cell.priority===null?'—':cell.priority}`;
+    $('priority-badge').className='pill '+(cell.priority>=65?'live':'');
+    if(cell.count===0 && !cell.species) { cell.species=[]; cell.observers=0; }
+    $('detail-species').textContent=cell.species?number(cell.speciesTotal??cell.species.length):'—'; $('detail-observers').textContent=cell.observers!==null&&cell.observers!==undefined?number(cell.observers):'—';
+    if(cell.species) renderSpecies(cell.species,$('detail-species-list')); else $('detail-species-list').innerHTML='<div class="small muted">Species details load when you select a live cell.</div>';
+    $('detail-caveat').textContent=`${state.lastScan&&state.lastScan.fast?'Count from iNaturalist grid tiles (map-tile cells, not equal-area). ':'Live observation count from iNaturalist. '}Priority currently uses count only; habitat and access data are not modeled.`;
+    renderGrid();
+    const selRow=$('rank-list').querySelector('.rank-row.selected');
+    if(selRow) { const l=$('rank-list'), rr=selRow.getBoundingClientRect(), lr=l.getBoundingClientRect(); if(rr.top<lr.top) l.scrollTop-=lr.top-rr.top; else if(rr.bottom>lr.bottom) l.scrollTop+=rr.bottom-lr.bottom; }
+    if(loadDetails && Number.isFinite(cell.count) && cell.count>0) loadCellDetails(cell);
+  }
+  // Observation period = optional from/to dates (iNaturalist d1 = observed on or after, d2 = on or before). The two date inputs are the single source of truth.
+  const ISO_DATE=/^\d{4}-\d{2}-\d{2}$/;
+  const isoDate=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  function presetDates(name) {
+    const now=new Date(), y=now.getFullYear(), back=n=>{ const d=new Date(now); d.setFullYear(y-n); return isoDate(d); };
+    return {all:['',''],last12:[back(1),''],last5:[back(5),''],thisyear:[`${y}-01-01`,''],lastyear:[`${y-1}-01-01`,`${y-1}-12-31`]}[name]||null;
+  }
+  function readFilters() { return {taxon:$('taxon-filter').value,d1:$('date-from').value||'',d2:$('date-to').value||''}; }
+  const periodError=f=>f.d1&&f.d2&&f.d1>f.d2?'The “from” date is after the “to” date. Fix the observation period first.':'';
+  function updatePeriodNote() {
+    const f=readFilters(), err=periodError(f), txt=err?'“From” is after “to” — fix the dates to scan':(f.d1||f.d2)?`Observed ${f.d1||'earliest'} to ${f.d2||'today'}`:'All dates';
+    $('period-note').textContent=txt; $('period-preset').title=txt; // the dates live in a tooltip; the note only takes space for a custom range or a problem
+    $('period-note').classList.toggle('hidden',!(err||$('period-preset').value==='custom'));
+  }
+  function applyPreset(name) { const r=presetDates(name); if(r) { $('date-from').value=r[0]; $('date-to').value=r[1]; } $('period-custom').classList.toggle('hidden',name!=='custom'); updatePeriodNote(); }
+  function setPeriod(d1,d2) {
+    const ok=d=>d && ISO_DATE.test(d) && !Number.isNaN(Date.parse(d)); d1=ok(d1)?d1:''; d2=ok(d2)?d2:'';
+    $('date-from').value=d1; $('date-to').value=d2; $('period-preset').value=(d1||d2)?'custom':'all'; $('period-custom').classList.toggle('hidden',!(d1||d2)); updatePeriodNote();
+  }
+  function queryParamsForCell(cell,extra={},filters=readFilters()) {
+    const b=cell.bounds; const params={swlat:b.swlat,swlng:b.swlng,nelat:b.nelat,nelng:b.nelng,per_page:1,verifiable:true,...extra};
+    if(filters.taxon) params.taxon_id=filters.taxon;
+    if(filters.d1) params.d1=filters.d1;
+    if(filters.d2) params.d2=filters.d2;
+    return params;
+  }
+  async function loadCellDetails(cell) {
+    if(state.detailController) state.detailController.abort();
+    const controller=new AbortController(); state.detailController=controller;
+    const filters=readFilters(); const detailScanId=state.scanId;
+    const cb=cell.bounds; const key=[cb.swlat,cb.swlng,cb.nelat,cb.nelng,filters.taxon,filters.d1,filters.d2].join('|');
+    const cached=cacheRead(state.detailCache,key,15*60*1000);
+    if(cached) { cell.species=cached.species; cell.speciesTotal=cached.speciesTotal; cell.observers=cached.observers; if(state.selectedId===cell.id) selectCell(cell.id,false); return; }
+    $('detail-species-list').innerHTML='<div class="small muted">Loading species details…</div>';
+    // While a scan is running, detail requests share its rate limit instead of adding unpaced traffic.
+    const paced=async url=>{ if(state.scanInProgress) await takeSlot(controller.signal); return apiFetch(url,controller.signal); };
+    const speciesParams=queryParamsForCell(cell,{per_page:12},filters), observerParams=queryParamsForCell(cell,{per_page:1},filters);
+    try {
+      const [obsData,speciesData]=await Promise.all([
+        paced(apiURL('/observations/observers',observerParams)),
+        paced(apiURL('/observations/species_counts',speciesParams))
+      ]);
+      if(controller.signal.aborted || state.detailController!==controller || state.scanId!==detailScanId || state.selectedId!==cell.id) return;
+      const counts=speciesData.results||[];
+      cell.species=counts.slice(0,8).map(x=>({name:x.taxon?.preferred_common_name||x.taxon?.name||'Unknown taxon',scientific:x.taxon?.name||'',count:x.count,url:x.taxon?.id?`https://www.inaturalist.org/taxa/${x.taxon.id}`:'https://www.inaturalist.org/observations'}));
+      const st=Number(speciesData.total_results), ob=Number(obsData.total_results);
+      cell.speciesTotal=Number.isFinite(st)?st:cell.species.length; cell.observers=Number.isFinite(ob)?ob:null;
+      cacheWrite(state.detailCache,key,{species:cell.species,speciesTotal:cell.speciesTotal,observers:cell.observers},200);
+      $('detail-species').textContent=number(cell.speciesTotal); $('detail-observers').textContent=cell.observers===null?'—':number(cell.observers); renderSpecies(cell.species,$('detail-species-list'));
+    } catch(err) {
+      if(err.name!=='AbortError' && state.selectedId===cell.id) $('detail-species-list').innerHTML='<div class="small muted">Could not load species details. The cell count is still available.</div>';
+    }
+  }
+
+  async function analyzeRegionCells(opts={}) {
+    if(!state.place || !state.bounds) { notice('Search for a place and select one of the iNaturalist results, or draw a boundary, first.',true); $('region-search').focus(); return; }
+    { const perr=periodError(readFilters()); if(perr) { notice(perr,true); return; } }
+    const fresh=!!opts.fresh;
+    // Validate the grid BEFORE touching any state, so an oversized request can never leave old cells behind a "Live" pill.
+    const requested=Number($('grid-size').value)||25; const grid=makeGrid(state.bounds,requested,MAX_CELLS,state.placePolys);
+    if(grid.tooMany) { notice(tooManyMsg(requested,grid),true); $('region-help').textContent=`Requested ${requested} km cells were not enlarged. This region needs ${number(grid.totalCells)} cells; the limit is ${MAX_CELLS}. Choose a smaller place or larger grid size.`; return; }
+    cancelScan(true); if(state.detailController) state.detailController.abort(); const filters=readFilters(); const myScan=++state.scanId; const controller=new AbortController(); state.activeController=controller;
+    state.lastScan={taxon:filters.taxon,d1:filters.d1,d2:filters.d2,grid:requested,fast:false,at:Date.now()};
+    const prior=state.selectedId; state.cells=grid.cells; state.cellsClipped=grid.clipped||0;
+    state.selectedId=state.cells.some(c=>c.id===prior)?prior:centerCellId(state.cells,state.bounds);
+    state.cells.forEach(c=>{c.count=null;c.queried=false;c.source='pending';c.fatal=false;});
+    state.scanInProgress=true; setMode('live'); refreshStale(); $('stop-btn').classList.remove('hidden'); $('analyze-btn').disabled=true; $('scan-progress-wrap').classList.remove('hidden');
+    $('region-status').textContent=state.regionName;
+    const cells=state.cells, smart=smartOn();
+    const levels=buildScanLevels(cells,smart), planned=planRequests(levels,filters,fresh);
+    $('region-help').textContent=`Using the selected ${requested} km cell size (${cells.length} cells). ${smart&&levels.length>1?'Smart scan: coarse blocks are queried first and blocks with no observations are skipped. ':''}Counts load from the selected cell outward at about one request per second.`;
+    renderGrid(); selectCell(state.selectedId,false); updateProgress(0,cells.length,`Querying ${requested} km cells · up to ~${fmtDuration(planned*RATE_MS)}`);
+    let errors=0,resolved=0,requests=0,netRequests=0,fromCache=0,inferred=0,derived=0,pointCells=0,pointPages=0,pointMisses=0,pointsOff=false,inflight=0,lastRender=0,oldestAt=Infinity;
+    // Work outward from the selected cell so the area the user is looking at fills in first.
+    const sel=cells.find(c=>c.id===state.selectedId)||cells[0]; const kLng=Math.max(.12,Math.cos(sel.center.lat*Math.PI/180));
+    const dist=n=>{ const b=n.bounds; return (((b.swlat+b.nelat)/2-sel.center.lat)**2)+((((b.swlng+b.nelng)/2)-sel.center.lng)*kLng)**2; };
+    const queue=[...levels[levels.length-1]].sort((a,b)=>dist(a)-dist(b));
+    const leavesOf=n=>n.level===0?[n.cell]:n.kids.flatMap(leavesOf);
+    const maybeRender=(force=false)=>{
+      const now=Date.now(); if(!force && now-lastRender<400) return; lastRender=now;
+      renderGrid(); updateProgress(resolved,cells.length);
+      const cur=selectedCell(); if(cur) { $('detail-count').textContent=Number.isFinite(cur.count)?number(cur.count):'…'; $('priority-badge').textContent=`Priority ${cur.priority===null?'—':cur.priority}`; }
+    };
+    const cnt=n=>n.level===0?n.cell.count:n.count;
+    // Parent count minus the counts of all its other children. Only valid when the children exactly fill the parent.
+    const inferredCount=node=>{
+      const p=node.parent; if(!p || !p.tiles || !Number.isFinite(p.count)) return null;
+      let sum=0; for(const k of p.kids) { if(k===node) continue; const c=cnt(k); if(!Number.isFinite(c)) return null; sum+=c; }
+      const v=p.count-sum; return v>=0?v:null;
+    };
+    const readCount=data=>{ const c=Number(data.total_results ?? data.total_entries ?? (Array.isArray(data.results)?data.results.length:NaN)); if(!Number.isFinite(c)||c<0) throw new Error('The API returned an invalid observation count'); return c; };
+    // Page through a block's observation locations (200 per request) and bin them into its cells: one request can replace many per-cell counts.
+    async function countByPoints(node,n,leaves) {
+      const gb=state.bounds, latStep=(gb.nelat-gb.swlat)/grid.rows, lngStep=(gb.nelng-gb.swlng)/grid.cols;
+      const counts=new Map(leaves.map(c=>[c.id,0]));
+      const base=queryParamsForCell(node,{per_page:200,order_by:'id',order:'asc',fields:'(id:!t,location:!t)'},filters);
+      const maxPages=Math.ceil(n*1.1/200)+2; let total=0,lastId=null,pages=0;
+      while(pages<maxPages) {
+        const data=await fetchCellCount(lastId===null?base:{...base,id_above:lastId},controller.signal);
+        if(controller.signal.aborted || myScan!==state.scanId) return false;
+        pages++; netRequests++; pointPages++;
+        const rows=data.results; if(!Array.isArray(rows)) { pointsOff=true; return false; }
+        for(const o of rows) {
+          const loc=typeof o.location==='string'?o.location.split(','):null; if(!loc || loc.length!==2) { pointsOff=true; return false; } // API did not return locations: stop trying for this scan
+          const lat=Number(loc[0]), lng=Number(loc[1]); if(!Number.isFinite(lat)||!Number.isFinite(lng)||!Number.isFinite(Number(o.id))) { pointsOff=true; return false; }
+          const r=Math.max(0,Math.min(grid.rows-1,Math.floor((lat-gb.swlat)/latStep))), c=Math.max(0,Math.min(grid.cols-1,Math.floor((lng-gb.swlng)/lngStep)));
+          const id=r+'-'+c; if(counts.has(id)) counts.set(id,counts.get(id)+1);
+          total++; lastId=o.id;
+        }
+        if(rows.length<200) break;
+      }
+      if(Math.abs(total-n)>Math.max(3,n*0.05)) { if(++pointMisses>=3) pointsOff=true; return false; } // snapshot disagrees with the block count (or a page was cut short): fall back to per-cell counts
+      for(const cell of leaves) {
+        const v=counts.get(cell.id); if(!cell.queried) resolved++;
+        cell.count=v; cell.queried=true; cell.source='live'; cell.error=null; cell.fatal=false;
+        cacheWrite(state.requestCache,countKey(queryParamsForCell(cell,{per_page:1,only_id:true},filters)),v,MAX_CACHE);
+      }
+      schedulePersist(); pointCells+=leaves.length; return true;
+    }
+    async function tryPoints(node,n) {
+      if(pointsOff) return false;
+      const leaves=leavesOf(node);
+      const uncached=fresh?leaves.length:leaves.filter(l=>!cacheEntry(state.requestCache,countKey(queryParamsForCell(l,{per_page:1,only_id:true},filters)),CACHE_TTL)).length;
+      if(Math.ceil(n/200)*2>uncached) return false; // only when it is clearly cheaper than querying the cells below
+      try { return await countByPoints(node,n,leaves); } catch(err) { return false; }
+    }
+    async function processNode(node) {
+      const params=queryParamsForCell(node,{per_page:1,only_id:true},filters), key=countKey(params);
+      const hit=fresh?null:cacheEntry(state.requestCache,key,CACHE_TTL);
+      let count=null, error=null, fatal=false, derivedHere=false; requests++;
+      if(hit) { count=hit.value; fromCache++; oldestAt=Math.min(oldestAt,hit.at); if(node.level===0) node.cell.source='cached'; }
+      else {
+        if(node.level===0) node.cell.source='loading';
+        try {
+          let data=await fetchCellCount(params,controller.signal,()=>inferredCount(node)!==null);
+          if(controller.signal.aborted || myScan!==state.scanId) return;
+          if(data===null) {
+            count=inferredCount(node); derivedHere=count!==null;
+            if(!derivedHere) { data=await fetchCellCount(params,controller.signal); if(controller.signal.aborted || myScan!==state.scanId) return; }
+          }
+          if(derivedHere) derived++;
+          else { count=readCount(data); cacheWrite(state.requestCache,key,count,MAX_CACHE); schedulePersist(); netRequests++; }
+        } catch(err) {
+          if(controller.signal.aborted || myScan!==state.scanId || err.name==='AbortError') return;
+          count=null; error=err.message||'Request failed'; fatal=err.retryable===false;
+        }
+      }
+      if(node.level>0) node.count=count;
+      if(node.level===0) {
+        const cell=node.cell;
+        if(count===null) { errors++; cell.count=null; cell.queried=false; cell.source='error'; cell.error=error; cell.fatal=fatal; }
+        else { cell.count=count; cell.queried=true; if(derivedHere) cell.source='inferred'; else if(!hit) cell.source='live'; cell.error=null; resolved++; }
+      } else if(count===0) {
+        // A block with zero observations proves every cell inside it is empty: no request needed.
+        for(const cell of leavesOf(node)) { cell.count=0; cell.queried=true; cell.source='inferred'; cell.error=null; resolved++; inferred++; }
+      } else {
+        // Non-empty (or failed) block: count its cells from one batch of locations when that is cheaper, else look at its children.
+        let done=false;
+        if(count!==null) { done=await tryPoints(node,count); if(controller.signal.aborted || myScan!==state.scanId) return; }
+        if(!done) queue.push(...node.kids.slice().sort((a,b)=>dist(a)-dist(b)));
+      }
+      if(requests%8===0 && resolved<cells.length) $('scan-progress-label').textContent=`Querying ${requested} km cells · up to ~${fmtDuration((cells.length-resolved)*RATE_MS)} left`;
+      maybeRender();
+    }
+    async function worker() {
+      while(!controller.signal.aborted && myScan===state.scanId) {
+        const node=queue.shift();
+        if(!node) { if(inflight===0) return; await waitForRetry(40,controller.signal); continue; }
+        inflight++;
+        try { await processNode(node); } finally { inflight--; }
+      }
+    }
+    try {
+      await Promise.all(Array.from({length:Math.min(CONCURRENCY,Math.max(1,queue.length))},()=>worker()));
+      if(myScan!==state.scanId) return;
+      maybeRender(true);
+
+      // Recovery pass: retry every cell that did not produce a valid count. Each request has its own backoff in fetchCellCount().
+      const MAX_CELL_RECOVERY_PASSES=2;
+      for(let pass=1;pass<=MAX_CELL_RECOVERY_PASSES && !controller.signal.aborted && myScan===state.scanId;pass++) {
+        const failed=cells.filter(c=>(!c.queried || !Number.isFinite(c.count)) && !c.fatal); // cells that failed with a non-retryable error are not retried
+        if(!failed.length) break;
+        $('scan-progress-label').textContent=`Retrying ${failed.length} incomplete cells · pass ${pass}/${MAX_CELL_RECOVERY_PASSES}…`;
+        setStatus(`${failed.length} cells incomplete · automatic recovery pass ${pass}/${MAX_CELL_RECOVERY_PASSES}`);
+        await waitForRetry(Math.min(1200*pass,6000),controller.signal);
+        if(controller.signal.aborted || myScan!==state.scanId) return;
+        let retryCursor=0, retryDone=0;
+        async function retryWorker() {
+          while(retryCursor<failed.length && !controller.signal.aborted && myScan===state.scanId) {
+            const cell=failed[retryCursor++];
+            try {
+              const params=queryParamsForCell(cell,{per_page:1,only_id:true},filters);
+              const data=await fetchCellCount(params,controller.signal);
+              if(controller.signal.aborted || myScan!==state.scanId) break;
+              const result=Number(data.total_results ?? data.total_entries ?? (Array.isArray(data.results)?data.results.length:NaN));
+              if(!Number.isFinite(result) || result<0) throw new Error('The API returned an invalid observation count');
+              if(!cell.queried) resolved++;
+              cell.count=result; cell.queried=true; cell.source='live'; cell.error=null; netRequests++;
+              cacheWrite(state.requestCache,countKey(params),result,MAX_CACHE); schedulePersist();
+            } catch(err) {
+              if(controller.signal.aborted || myScan!==state.scanId || err.name==='AbortError') break;
+              cell.count=null; cell.queried=false; cell.source='error'; cell.error=err.message||'Recovery retry failed';
+            }
+            retryDone++;
+            updateProgress(resolved,cells.length,`Recovery pass ${pass}/${MAX_CELL_RECOVERY_PASSES} · ${failed.length-retryDone} cells left to retry`);
+            if(retryDone%16===0 || retryDone===failed.length) renderGrid();
+          }
+        }
+        await Promise.all(Array.from({length:Math.min(CONCURRENCY,failed.length)},()=>retryWorker()));
+        if(myScan!==state.scanId) return;
+        renderGrid();
+      }
+      if(myScan!==state.scanId || controller.signal.aborted) return;
+      // Recompute from final cell state so the status cannot claim a complete scan while cells are missing.
+      const loadedCount=cells.filter(c=>c.queried && Number.isFinite(c.count)).length;
+      errors=cells.length-loadedCount;
+      renderGrid();
+      state.scanInProgress=false; state.lastUpdated=new Date(); writeHash(); persistCounts();
+      $('stop-btn').classList.add('hidden'); $('analyze-btn').disabled=false; $('scan-progress-label').textContent='Scan complete'; updateProgress(loadedCount,cells.length,'Scan complete');
+      if(state.activeController===controller) state.activeController=null;
+      if(requests>0 && netRequests===0) setMode('cached');
+      $('map-status').textContent=errors?`LIVE RESULTS · ${errors} cell error${errors===1?'':'s'}`:state.mode==='cached'?'SAVED iNATURALIST COUNTS':'LIVE iNATURALIST RESULTS';
+      const parts=[`${errors?'Scan finished with missing cells':'Scan complete'} · ${loadedCount} / ${cells.length} cell counts loaded`,`${number(netRequests)} request${netRequests===1?'':'s'} sent`];
+      if(fromCache) parts.push(`${number(fromCache)} from saved counts${Number.isFinite(oldestAt)?` (oldest ${fmtAge(Date.now()-oldestAt)} old)`:''}`);
+      if(inferred) parts.push(`${number(inferred)} empty cells skipped`);
+      if(derived) parts.push(`${number(derived)} counts derived by subtraction`);
+      if(pointCells) parts.push(`${number(pointCells)} cells counted from ${number(pointPages)} location page${pointPages===1?'':'s'}`);
+      if(errors) parts.push(`${errors} still missing after retries`);
+      setStatus(parts.join(' · '),`Updated ${state.lastUpdated.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`);
+      if(errors) notice(`${errors} of ${cells.length} cells are still missing after ${MAX_CELL_RECOVERY_PASSES} automatic recovery passes. Failed cells remain visibly marked on the map; check your connection or run Analyze again to retry them.`,true);
+      const cur=selectedCell(); const target=(cur&&Number.isFinite(cur.count))?cur:(state.cells.find(c=>c.count===0)||state.cells.find(c=>Number.isFinite(c.count))); if(target) selectCell(target.id,true);
+      renderGrid();
+    } catch(err) {
+      if(err.name!=='AbortError') notice(err.message||'The live scan failed.',true);
+      if(myScan===state.scanId) {state.scanInProgress=false;state.activeController=null;$('stop-btn').classList.add('hidden');$('analyze-btn').disabled=false;}
+    }
+  }
+  const tileCache=new Map(); // decoded tiles; also saved in localStorage for CACHE_TTL so fast-mode re-runs survive a reload
+  const TILE_STORE_KEY='inatgaps.tiles.v1', MAX_TILE_CACHE=150;
+  function loadPersistedTiles() {
+    try {
+      const o=JSON.parse(localStorage.getItem(TILE_STORE_KEY)||'null'); if(!o || o.v!==1 || !Array.isArray(o.e)) return; const now=Date.now();
+      for(const [k,at,t,c,f] of o.e) {
+        if(typeof k!=='string' || !Number.isFinite(at) || now-at>=CACHE_TTL || !Array.isArray(c)) continue;
+        const counts=new Array(1024).fill(0); let ok=true; for(const [i,n] of c) { if(!(i>=0&&i<1024) || !Number.isFinite(n)) { ok=false; break; } counts[i]=n; }
+        if(ok) tileCache.set(k,{value:{counts,cellsWithData:c.length,total:t,fields:f||[]},at});
+      }
+    } catch(e) {}
+  }
+  let tilePersistTimer=null;
+  function persistTiles() {
+    clearTimeout(tilePersistTimer); const now=Date.now();
+    const pack=n=>[...tileCache].filter(([k,v])=>now-v.at<CACHE_TTL).sort((a,b)=>a[1].at-b[1].at).slice(-n).map(([k,v])=>{ const c=[]; v.value.counts.forEach((n,i)=>{ if(n>0) c.push([i,n]); }); return [k,v.at,v.value.total,c,v.value.fields]; });
+    for(let n=MAX_TILE_CACHE;n>=10;n=Math.floor(n/2)) { try { localStorage.setItem(TILE_STORE_KEY,JSON.stringify({v:1,e:pack(n)})); return; } catch(e) {} } // quota full: retry with fewer tiles
+  }
+  const schedulePersistTiles=()=>{ clearTimeout(tilePersistTimer); tilePersistTimer=setTimeout(persistTiles,1500); };
+  loadPersistedTiles();
+  const tileKey=(t,f)=>[$('proto-endpoint').value,`${t.z}/${t.x}/${t.y}`,f.taxon||'',f.d1||'',f.d2||''].join('|');
+  function estimateTextTiles(filters=readFilters()) {
+    const need=(state.tiles||[]).filter(t=>cacheEntry(tileCache,tileKey(t,filters),CACHE_TTL)===null).length;
+    return need?`${need} tile request${need===1?'':'s'} · ~${fmtDuration(need*RATE_MS)}`:'tiles cached this session · re-run is instant';
+  }
+  function previewGridTiles() {
+    cancelScan(true); updateZoomLabels();
+    const z=tileZoom(), grid=makeTileGrid(state.bounds,z,state.placePolys);
+    state.lastScan=null; state.cellsClipped=grid.clipped||0;
+    if(grid.tooMany) {
+      state.cells=[]; state.tiles=[]; state.selectedId=null; setMode('idle'); refreshStale(); renderGrid();
+      notice(tileTooMany(z,grid),true);
+      $('region-help').textContent=`${state.regionName} remains selected. ${tileTooMany(z,grid)}`;
+      return;
+    }
+    state.cells=grid.cells; state.tiles=grid.tiles; state.cells.forEach(c=>{c.count=null;c.queried=false;c.source='pending';});
+    state.selectedId=centerCellId(state.cells,state.bounds);
+    setMode('idle'); refreshStale(); resetScanUI();
+    $('region-status').textContent=state.regionName;
+    const clip=grid.clipped?`, ${number(grid.clipped)} outside the place dropped`:'';
+    $('region-help').textContent=`${state.regionName} is selected. Zoom ${z}: ${grid.tiles.length} tile${grid.tiles.length===1?'':'s'}, ${number(grid.cells.length)} cells${clip}. Click “Analyze live region” · ${estimateText()}.`;
+    renderGrid(); if(state.selectedId) selectCell(state.selectedId,false);
+    setStatus(`Grid ready: ${state.regionName} · zoom ${z}`);
+    writeHash();
+  }
+  async function analyzeRegionTiles(opts={}) {
+    if(!state.place || !state.bounds) { notice('Search for a place and select one of the iNaturalist results, or draw a boundary, first.',true); $('region-search').focus(); return; }
+    { const perr=periodError(readFilters()); if(perr) { notice(perr,true); return; } }
+    const fresh=!!opts.fresh, z=tileZoom(), grid=makeTileGrid(state.bounds,z,state.placePolys);
+    if(grid.tooMany) { notice(tileTooMany(z,grid),true); return; } // validate before touching any state
+    cancelScan(true); if(state.detailController) state.detailController.abort(); const filters=readFilters(); const myScan=++state.scanId; const controller=new AbortController(); state.activeController=controller;
+    state.lastScan={taxon:filters.taxon,d1:filters.d1,d2:filters.d2,grid:z,fast:true,at:Date.now()};
+    const prior=state.selectedId; state.cells=grid.cells; state.tiles=grid.tiles; state.cellsClipped=grid.clipped||0;
+    state.selectedId=state.cells.some(c=>c.id===prior)?prior:centerCellId(state.cells,state.bounds);
+    state.cells.forEach(c=>{c.count=null;c.queried=false;c.source='pending';});
+    state.scanInProgress=true; setMode('live'); refreshStale(); $('stop-btn').classList.remove('hidden'); $('analyze-btn').disabled=true; $('scan-progress-wrap').classList.remove('hidden');
+    $('region-status').textContent=state.regionName;
+    const cells=state.cells, tiles=state.tiles;
+    $('region-help').textContent=`Zoom ${z}: ${tiles.length} tile${tiles.length===1?'':'s'} cover ${number(cells.length)} cells. Tiles load from the selected cell outward at about one request per second.`;
+    renderGrid(); selectCell(state.selectedId,false); updateProgress(0,cells.length,`Fetching ${tiles.length} zoom-${z} tile${tiles.length===1?'':'s'}…`);
+    let resolved=0,tilesDone=0,netTiles=0,fromCache=0,errors=0,oldestAt=Infinity,lastRender=0,decodedTotal=0;
+    const sel=cells.find(c=>c.id===state.selectedId)||cells[0], kLng=Math.max(.12,Math.cos(sel.center.lat*Math.PI/180));
+    const tdist=t=>{ const b=tileBounds(t); return (((b.swlat+b.nelat)/2-sel.center.lat)**2)+((((b.swlng+b.nelng)/2)-sel.center.lng)*kLng)**2; };
+    const order=[...tiles].sort((a,b)=>tdist(a)-tdist(b));
+    const maybeRender=(force=false)=>{
+      const now=Date.now(); if(!force && now-lastRender<400) return; lastRender=now;
+      renderGrid(); updateProgress(resolved,cells.length);
+      const cur=selectedCell(); if(cur) { $('detail-count').textContent=Number.isFinite(cur.count)?number(cur.count):'…'; $('priority-badge').textContent=`Priority ${cur.priority===null?'—':cur.priority}`; }
+    };
+    async function handleTile(tile,isProbe=false) {
+      tile.cells.forEach(c=>{ if(!c.queried) c.source='loading'; });
+      try {
+        const hit=fresh?null:cacheEntry(tileCache,tileKey(tile,filters),CACHE_TTL); let dec;
+        if(hit) { dec=hit.value; fromCache++; oldestAt=Math.min(oldestAt,hit.at); }
+        else { dec=isProbe?await probeTiles(tile,filters,controller.signal):await loadTile(tile,filters,controller.signal); netTiles++; }
+        if(controller.signal.aborted || myScan!==state.scanId) return;
+        for(const cell of tile.cells) { if(!cell.queried) resolved++; cell.count=dec.counts[cell.slot]; cell.queried=true; cell.source=hit?'cached':'tile'; cell.error=null; }
+        decodedTotal+=dec.total; tilesDone++;
+      } catch(err) {
+        if(controller.signal.aborted || myScan!==state.scanId || err.name==='AbortError') return;
+        for(const cell of tile.cells) { cell.count=null; cell.queried=false; cell.source='error'; cell.error=err.message||'Tile request failed'; }
+        protoLog(`Tile z${tile.z}/${tile.x}/${tile.y} failed: ${err.message}`);
+        if(isProbe) throw err; // the first tile decides whether this endpoint works at all
+      }
+      maybeRender();
+    }
+    async function runPool(list) {
+      const q=list.slice();
+      await Promise.all(Array.from({length:Math.min(3,q.length)},async()=>{ while(!controller.signal.aborted && myScan===state.scanId && q.length) await handleTile(q.shift()); }));
+    }
+    try {
+      await handleTile(order[0],true);
+      if(myScan!==state.scanId) return;
+      await runPool(order.slice(1));
+      if(myScan!==state.scanId) return;
+      const MAX_RECOVERY=2;
+      for(let pass=1;pass<=MAX_RECOVERY && !controller.signal.aborted && myScan===state.scanId;pass++) {
+        const failed=tiles.filter(t=>t.cells.some(c=>!c.queried)); if(!failed.length) break;
+        setStatus(`${failed.length} tile${failed.length===1?'':'s'} incomplete · recovery pass ${pass}/${MAX_RECOVERY}`);
+        await waitForRetry(Math.min(1200*pass,6000),controller.signal);
+        await runPool(failed);
+      }
+      if(myScan!==state.scanId || controller.signal.aborted) return;
+      const loadedCount=cells.filter(c=>c.queried && Number.isFinite(c.count)).length; errors=cells.length-loadedCount;
+      renderGrid(); state.scanInProgress=false; state.lastUpdated=new Date(); writeHash();
+      $('stop-btn').classList.add('hidden'); $('analyze-btn').disabled=false; updateProgress(loadedCount,cells.length,'Scan complete');
+      if(state.activeController===controller) state.activeController=null;
+      if(tilesDone>0 && netTiles===0) setMode('cached');
+      $('map-status').textContent=errors?`${errors} cell error${errors===1?'':'s'}`:'iNATURALIST GRID TILES · FAST MODE';
+      const parts=[`${errors?'Scan finished with missing cells':'Scan complete'} · ${number(loadedCount)} / ${number(cells.length)} cells from ${tiles.length} tile${tiles.length===1?'':'s'}`,`${netTiles} request${netTiles===1?'':'s'} sent`];
+      if(fromCache) parts.push(`${fromCache} from this session's cache (oldest ${fmtAge(Date.now()-oldestAt)})`);
+      if(errors) parts.push(`${errors} cells still missing`);
+      setStatus(parts.join(' · '),`Updated ${state.lastUpdated.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`);
+      protoLog(`Scan: ${tiles.length} tiles, ${number(loadedCount)} cells, decoded cellCount total ${number(decodedTotal)}, ${netTiles} requests. Run “Check one tile” to compare against /observations.`);
+      if(errors) notice(`${errors} of ${cells.length} cells are missing after ${MAX_RECOVERY} recovery passes. Check the fast-mode log.`,true);
+      const cur=selectedCell(); const target=(cur&&Number.isFinite(cur.count))?cur:(state.cells.find(c=>c.count===0)||state.cells.find(c=>Number.isFinite(c.count))); if(target) selectCell(target.id,true);
+      renderGrid();
+    } catch(err) {
+      if(err.name!=='AbortError') { notice(`Grid-tile request failed: ${err.message}. See the fast-mode log.`,true); protoLog(`Scan aborted: ${err.message}`); }
+      if(myScan===state.scanId) {state.scanInProgress=false;state.activeController=null;$('stop-btn').classList.add('hidden');$('analyze-btn').disabled=false;renderGrid();}
+    }
+  }
+  function updateProgress(done,total,label) {
+    const safeDone=Math.max(0,Math.min(total,done));
+    $('scan-progress-num').textContent=`${safeDone} / ${total}`;
+    $('scan-progress-bar').style.width=`${total?safeDone/total*100:0}%`;
+    if(label) $('scan-progress-label').textContent=label;
+  }
+  function cancelScan(silent=false) {
+    if(state.activeController) state.activeController.abort(); state.activeController=null; state.scanId++; state.scanInProgress=false; if(state.detailController) { state.detailController.abort(); state.detailController=null; }
+    if(!$('stop-btn').classList.contains('hidden')) { $('stop-btn').classList.add('hidden'); $('analyze-btn').disabled=false; if(!silent) { $('scan-progress-label').textContent='Scan cancelled · partial results retained'; setStatus('Scan cancelled · partial results retained'); } }
+  }
+
+  function exportName(ext) {
+    const slug=t=>String(t).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+    const f=state.lastScan||readFilters();
+    return ['inatgaps',slug(state.regionName)||'region',f.taxon?slug(TAXA_NAMES[f.taxon]||f.taxon):'',(f.d1||f.d2)?`${f.d1||'start'}_to_${f.d2||'now'}`:'',(state.lastScan&&state.lastScan.fast?'z'+state.lastScan.grid:(state.lastScan?state.lastScan.grid:$('grid-size').value)+'km'),new Date().toISOString().slice(0,10)].filter(Boolean).join('-')+'.'+ext;
+  }
+  function exportMeta() { const f=state.lastScan||readFilters(); return {taxon:f.taxon?(TAXA_NAMES[f.taxon]||f.taxon):'All taxa',since:f.d1||'',until:f.d2||'',grid:state.lastScan?(state.lastScan.fast?'z'+state.lastScan.grid:state.lastScan.grid):Number($('grid-size').value)}; }
+  const csvText=t=>/^[=+\-@\t\r]/.test(String(t))?"'"+t:t; // neutralise spreadsheet formula injection in text cells
+  function exportCellsGeoJSON() {
+    if(!state.cells.length) { notice('No grid cells to export yet.',true); return; }
+    const meta=exportMeta(); const fc={type:'FeatureCollection',features:state.cells.map(c=>{ const b=c.bounds; return {type:'Feature',properties:{cell_id:c.label,region:state.regionName,taxon_filter:meta.taxon,observed_since:meta.since,observed_until:meta.until,grid_km:meta.grid,area_km2:+c.areaKm2.toFixed(6),observation_count:c.count,observations_per_km2:Number.isFinite(c.count)?+(c.count/Math.max(.0001,c.areaKm2)).toFixed(4):null,survey_priority:c.priority,priority_band:priorityBand(c),status:c.source},geometry:{type:'Polygon',coordinates:[[[b.swlng,b.swlat],[b.nelng,b.swlat],[b.nelng,b.nelat],[b.swlng,b.nelat],[b.swlng,b.swlat]]]}}; })};
+    downloadText(exportName('geojson'),JSON.stringify(fc),'application/geo+json');
+  }
+  function exportCellsCSV() {
+    if(!state.cells.length) { notice('No grid cells to export yet.',true); return; }
+    const meta=exportMeta(); const columns=['cell_id','region','taxon_filter','observed_since','observed_until','grid_km','latitude','longitude','south_latitude','west_longitude','north_latitude','east_longitude','area_km2','observation_count','observations_per_km2','survey_priority','priority_band','data_source'];
+    const lines=[columns.join(',')];
+    state.cells.forEach(c=>{const vals=[c.label,csvText(state.regionName),meta.taxon,meta.since,meta.until,meta.grid,c.center.lat.toFixed(6),c.center.lng.toFixed(6),c.bounds.swlat.toFixed(6),c.bounds.swlng.toFixed(6),c.bounds.nelat.toFixed(6),c.bounds.nelng.toFixed(6),c.areaKm2.toFixed(6),c.count===null?'':c.count,Number.isFinite(c.count)?(c.count/Math.max(.0001,c.areaKm2)).toFixed(4):'',c.priority===null?'':c.priority,priorityBand(c),c.source||state.mode];lines.push(vals.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));});
+    downloadText(exportName('csv'),'\ufeff'+lines.join('\r\n'),'text/csv;charset=utf-8');
+  }
+  function downloadText(filename,content,type) {
+    const blob=new Blob([content],{type}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+  function openSelectedOnINat() {
+    const c=selectedCell(); if(!c) return;
+    const params=new URLSearchParams({nelat:c.bounds.nelat,nelng:c.bounds.nelng,swlat:c.bounds.swlat,swlng:c.bounds.swlng});
+    const taxon=$('taxon-filter').value; if(taxon) params.set('taxon_id',taxon); const f=readFilters(); if(f.d1) params.set('d1',f.d1); if(f.d2) params.set('d2',f.d2);
+    window.open(`https://www.inaturalist.org/observations?${params.toString()}`,'_blank','noopener');
+  }
+
+  // Changing a filter no longer fires a hundreds-of-requests rescan: results are marked stale and the user re-runs on purpose.
+  const onFilterChange=()=>{ writeHash(); refreshStale(); renderGrid(); };
+  $('taxon-filter').addEventListener('change',onFilterChange);
+  $('fast-mode').addEventListener('change',()=>setFast($('fast-mode').checked));
+  $('period-preset').addEventListener('change',()=>{ applyPreset($('period-preset').value); onFilterChange(); });
+  ['date-from','date-to'].forEach(id=>$(id).addEventListener('change',()=>{ updatePeriodNote(); onFilterChange(); }));
+  $('grid-size').addEventListener('change',()=>{
+    if(!state.place || !state.bounds) { updateEstimate(); return; }
+    const hadResults=state.mode==='live' || state.mode==='cached';
+    previewGrid(); // rebuilds (or clears) the grid immediately, so the map, pill and exports always match the dropdown
+    if(hadResults && state.cells.length) notice('Grid size changed. Click “Analyze live region” to load counts for the new grid.');
+  });
+  $('detail-toggle').addEventListener('click',()=>{ const box=$('selected-detail'); const collapsed=box.classList.toggle('collapsed'); const btn=$('detail-toggle'); btn.setAttribute('aria-expanded',String(!collapsed)); btn.setAttribute('aria-label',collapsed?'Expand selected grid cell details':'Collapse selected grid cell details'); btn.title=collapsed?'Expand details':'Collapse details'; });
+  document.addEventListener('click',e=>{
+    const btn=e.target.closest('[data-action]'); if(!btn) return;
+    switch(btn.dataset.action) {
+      case 'proto-tilecheck': protoTileCheck(); break;
+      case 'proto-cellcheck': protoCellCheck(); break;
+      case 'toggle-theme': toggleTheme(); break;
+      case 'analyze': analyzeRegion(); break;
+      case 'analyze-fresh': analyzeRegion({fresh:true}); break;
+      case 'draw-boundary': toggleBoundaryDrawing(); break;
+      case 'toggle-stats': setStatsCollapsed(!$('stats-grid').classList.contains('hidden')); break;
+      case 'upload-boundary': $('boundary-file').click(); break;
+      case 'cancel': cancelScan(); break;
+      case 'export-csv': exportCellsCSV(); break;
+      case 'export-geojson': exportCellsGeoJSON(); break;
+      case 'open-inat': openSelectedOnINat(); break;
+    }
+  });
+  window.addEventListener('beforeunload',()=>{if(state.activeController) state.activeController.abort();if(state.detailController) state.detailController.abort();persistCounts();});
+  window.addEventListener('pagehide',persistCounts);
+  document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden') persistCounts(); });
+  $('smart-scan').addEventListener('change',updateEstimate);
+
+  function writeHash() {
+    try {
+      if(!state.place || !state.bounds) return;
+      const p=new URLSearchParams();
+      if(state.place.id) p.set('p',state.place.id); else p.set('b',[state.bounds.swlat,state.bounds.swlng,state.bounds.nelat,state.bounds.nelng].map(v=>v.toFixed(5)).join(','));
+      p.set('g',$('grid-size').value); if(fastOn()) p.set('f','1'); const f=readFilters(); if(f.taxon) p.set('t',f.taxon); if(f.d1) p.set('d1',f.d1); if(f.d2) p.set('d2',f.d2);
+      history.replaceState(null,'','#'+p.toString());
+    } catch(e) {}
+  }
+  function restoreFromHash() {
+    const p=new URLSearchParams(location.hash.replace(/^#/,'')); if(!p.has('p') && !p.has('b')) return;
+    const setSel=(id,v)=>{ const el=$(id); if(v!==null && [...el.options].some(o=>o.value===v)) el.value=v; };
+    if(p.get('f')==='1') setFast(true,false); setSel('grid-size',p.get('g')); setSel('taxon-filter',p.get('t')); { const y=/^\d{4}$/.test(p.get('y')||'')?p.get('y'):''; setPeriod(p.get('d1')||(y?y+'-01-01':''),p.get('d2')||''); }
+    const b=(p.get('b')||'').split(',').map(Number);
+    if(p.has('b') && b.length===4 && b.every(Number.isFinite) && b[0]<b[2] && b[1]<b[3] && b[0]>=-90 && b[2]<=90 && b[1]>=-180 && b[3]<=180) {
+      const bounds={swlat:b[0],swlng:b[1],nelat:b[2],nelng:b[3]};
+      state.place={id:null,name:'Custom drawn area',shortName:'Custom drawn area',bounds,raw:null};
+      state.placeGeometry=null; state.placePolys=null; state.bounds=bounds; state.regionName='Custom drawn area'; state.didFit=false;
+      $('region-search').value='Custom drawn area'; $('region-status').textContent='Custom drawn area';
+      drawRegionBoundary(); previewGrid();
+      fitToBounds({swlat:b[0],swlng:b[1],nelat:b[2],nelng:b[3]});
+      if(state.cells.length) notice('Shared view loaded. Click “Analyze live region” to load counts.');
+    } else if(/^\d+$/.test(p.get('p')||'')) {
+      selectPlace({id:p.get('p'),name:'Place '+p.get('p'),shortName:'',bounds:null,raw:null}).then(()=>{ if(state.cells.length) notice('Shared view loaded. Click “Analyze live region” to load counts.'); });
+    }
+  }
+  loadPersistedCounts();
+  initMap();
+  setMode('idle'); renderGrid(); setStatus('Search for a place to begin');
+  restoreFromHash();
+})();
+</script>
+</body>
+</html>
