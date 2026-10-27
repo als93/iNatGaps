@@ -89,4 +89,4 @@ Observation data belongs to iNaturalist and its contributors, and each observati
 
 ## License
 
-[Add license name here]. See `LICENSE`.
+This project is licensed under the **GNU General Public License v3.0** (GNU GPLv3). See the [`LICENSE`](LICENSE) file for full details.
