@@ -7,7 +7,7 @@ iNaturalist observations pile up where people already go: trailheads, city parks
 
 It's a single HTML file. There is no server, no build step, and nothing to install.
 
-**Live version:** `https://als.github.io/iNatGaps/`
+**Live version:** `https://als93.github.io/iNatGaps/`
 
 ## What it does
 
